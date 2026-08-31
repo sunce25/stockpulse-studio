@@ -1,14 +1,6 @@
-"""Fund data normalization and deterministic portfolio analysis."""
+"""Fund package.
 
-from funds.fund_adapter import normalize_fund_holding, normalize_fund_holdings
-from funds.fund_analyzer import FundAnalyzer
-from funds.portfolio_analyzer import PortfolioAnalyzer
-from funds.yangjibao_client import YangJiBaoClient
-
-__all__ = [
-    "FundAnalyzer",
-    "PortfolioAnalyzer",
-    "YangJiBaoClient",
-    "normalize_fund_holding",
-    "normalize_fund_holdings",
-]
+Business objects are imported from their concrete modules. Keeping package
+initialization side-effect free avoids import-lock conflicts during Streamlit
+Cloud hot reloads.
+"""
