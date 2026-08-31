@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import hashlib
 import time
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
 from config.settings import get_setting
+from funds.fund_adapter import normalize_fund_holdings
 
 
 DEFAULT_BASE_URL = "https://browser-plug-api.yangjibao.com"
@@ -187,6 +189,161 @@ class YangJiBaoClient:
             )
         return accounts
 
-    def get_holdings(self):
-        """Remain disabled until the read-only connection is verified safely."""
-        raise NotImplementedError("养基宝持仓同步尚未启用；当前仅验证登录和账户列表。")
+    @staticmethod
+    def _first(raw: dict[str, Any], *keys: str, default: Any = "") -> Any:
+        for key in keys:
+            value = raw.get(key)
+            if value not in (None, ""):
+                return value
+        return default
+
+    @staticmethod
+    def _number(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value) if value not in (None, "") else default
+        except (TypeError, ValueError):
+            return default
+
+    def _map_holding(self, raw: dict[str, Any], fetched_at: str) -> dict[str, Any] | None:
+        """Map provider fields to provider-neutral fields inside the boundary."""
+        code = str(self._first(raw, "fund_code", "code")).strip()
+        if not code:
+            return None
+
+        nv_info = raw.get("nv_info")
+        if not isinstance(nv_info, dict):
+            nv_info = {}
+        shares = self._number(self._first(raw, "hold_share", "share"))
+        cost_nav = self._number(self._first(raw, "hold_cost", "cost_nav"))
+        latest_nav = self._number(
+            self._first(raw, "last_net", "latest_nav", "nav", "dwjz")
+        )
+        market_value = self._number(self._first(raw, "money", "market_value", "amount"))
+        profit_value = self._first(
+            raw, "hold_earn", "holding_profit", "profit", default=None
+        )
+        holding_profit = self._number(profit_value)
+        cost_amount = self._number(
+            self._first(raw, "cost_money", "cost_amount", "hold_money")
+        )
+        if not market_value and shares and latest_nav:
+            market_value = shares * latest_nav
+        if not cost_amount:
+            if market_value and profit_value not in (None, ""):
+                cost_amount = market_value - holding_profit
+            elif shares and cost_nav:
+                cost_amount = shares * cost_nav
+
+        estimated_nav_value = self._first(
+            nv_info, "gsz", "vgsz", "zsgz", "estimated_nav", default=None
+        )
+        estimated_nav = (
+            None
+            if estimated_nav_value in (None, "")
+            else self._number(estimated_nav_value)
+        )
+        nav_date = str(
+            self._first(
+                raw,
+                "nav_date",
+                "last_net_date",
+                "jzrq",
+                default=self._first(nv_info, "jzrq", "nav_date"),
+            )
+            or ""
+        ).strip()
+        estimated_time = str(
+            self._first(
+                nv_info,
+                "gztime",
+                "time",
+                "estimated_nav_time",
+                default=self._first(raw, "estimated_nav_time", "update_time"),
+            )
+            or ""
+        ).strip()
+        category = str(
+            self._first(raw, "category", "fund_type", "type_name", "market_type")
+            or ""
+        ).strip()
+        qdii_text = " ".join(
+            [
+                category,
+                str(self._first(raw, "market_type", "market", "region")),
+                str(self._first(raw, "short_name", "fund_name", "name")),
+            ]
+        ).upper()
+        is_qdii = any(keyword in qdii_text for keyword in ("QDII", "海外", "全球"))
+
+        holding_return_value = self._first(
+            raw,
+            "hold_earn_rate",
+            "holding_return_pct",
+            "profit_rate",
+            default=None,
+        )
+        return {
+            "fund_code": code,
+            "fund_name": str(
+                self._first(raw, "fund_name", "short_name", "name", default=code)
+            ).strip(),
+            "market_value": market_value,
+            "cost_amount": cost_amount,
+            "shares": shares,
+            "cost_nav": cost_nav,
+            "latest_nav": latest_nav,
+            "estimated_nav": estimated_nav,
+            "holding_return_pct": (
+                None
+                if holding_return_value in (None, "")
+                else self._number(holding_return_value)
+            ),
+            "holding_profit": (
+                None if profit_value in (None, "") else holding_profit
+            ),
+            "today_profit": self._number(
+                self._first(raw, "today_earn", "today_income", "day_earn")
+            ),
+            "source": "yangjibao",
+            "updated_at": fetched_at,
+            "nav_date": nav_date,
+            "estimated_nav_time": estimated_time,
+            "market_timezone": "Asia/Shanghai",
+            "is_qdii": is_qdii,
+            "data_freshness": "unknown" if not nav_date else "",
+            "stale_data": True if not nav_date else None,
+            "freshness_reference": nav_date,
+            "asset_type": "fund",
+            "industry": category or "未分类",
+            "theme": category or "未分类",
+            "region": "overseas" if is_qdii else "china",
+        }
+
+    def get_holdings(self, account_id: str | None = None) -> list[dict[str, Any]]:
+        """Fetch one account read-only and return normalized StockPulse holdings."""
+        if not self._token:
+            raise YangJiBaoError("尚未完成养基宝授权。")
+        selected_account = str(account_id or self._account_id or "").strip()
+        if (
+            not selected_account
+            or len(selected_account) > 128
+            or any(ord(char) < 32 for char in selected_account)
+        ):
+            raise YangJiBaoError("养基宝账户无效，请重新选择账户。")
+
+        data = self._request(
+            "/fund_hold", params={"account_id": selected_account}
+        )
+        raw_holdings = data.get("list", []) if isinstance(data, dict) else data
+        if not isinstance(raw_holdings, list):
+            raise YangJiBaoError("养基宝持仓数据格式异常。")
+
+        fetched_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        mapped = [
+            item
+            for raw in raw_holdings
+            if isinstance(raw, dict)
+            for item in [self._map_holding(raw, fetched_at)]
+            if item is not None
+        ]
+        return normalize_fund_holdings(mapped, source="yangjibao")

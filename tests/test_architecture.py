@@ -72,10 +72,10 @@ class FundArchitectureTests(unittest.TestCase):
         self.assertEqual(analysis["risk_status"], "数据不足")
         self.assertEqual(analysis["recommendation"], "观察")
 
-    def test_integrations_are_placeholders(self):
+    def test_optional_integrations_default_to_safe_state(self):
         client = YangJiBaoClient(token="", account_id="")
         self.assertFalse(client.is_configured())
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises(YangJiBaoError):
             client.get_holdings()
         copilot = AICopilot(provider="", api_key="", model="")
         self.assertEqual(copilot.answer_question({}, "test"), NOT_CONFIGURED_MESSAGE)
@@ -120,6 +120,30 @@ class FundArchitectureTests(unittest.TestCase):
                     return FakeResponse(
                         {"code": 200, "data": {"state": 2, "token": "private-token"}}
                     )
+                if url.endswith("/fund_hold"):
+                    self.last_holdings_params = params
+                    return FakeResponse(
+                        {
+                            "code": 200,
+                            "data": [
+                                {
+                                    "code": "000001",
+                                    "short_name": "测试基金",
+                                    "hold_share": "100.5",
+                                    "hold_cost": "1.2",
+                                    "last_net": "1.3",
+                                    "money": "130.65",
+                                    "hold_earn": "10.05",
+                                    "cost_money": "120.60",
+                                    "jzrq": "2026-08-31",
+                                    "nv_info": {
+                                        "gsz": "1.31",
+                                        "gztime": "2026-09-01T10:00:00+08:00",
+                                    },
+                                }
+                            ],
+                        }
+                    )
                 return FakeResponse(
                     {
                         "code": 200,
@@ -147,11 +171,19 @@ class FundArchitectureTests(unittest.TestCase):
             session=session,
         )
         accounts = authorized.get_accounts()
+        holdings = authorized.get_holdings("account-1")
 
         self.assertEqual(login["state"], "authorized")
         self.assertEqual(accounts[0]["display_name"], "长期账户")
         self.assertEqual(set(accounts[0]), {"account_id", "display_name", "holding_count"})
         self.assertNotIn("private-token", str(authorized.configuration_status()))
+        self.assertEqual(session.last_holdings_params, {"account_id": "account-1"})
+        self.assertEqual(holdings[0]["fund_code"], "000001")
+        self.assertEqual(holdings[0]["source"], "yangjibao")
+        self.assertEqual(holdings[0]["market_value"], 130.65)
+        self.assertEqual(holdings[0]["estimated_nav"], 1.31)
+        self.assertTrue(set(FUND_HOLDING_FIELDS).issubset(holdings[0]))
+        self.assertNotIn("hold_share", holdings[0])
 
 
 if __name__ == "__main__":

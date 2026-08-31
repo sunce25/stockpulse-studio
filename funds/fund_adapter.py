@@ -99,8 +99,12 @@ def normalize_fund_holding(raw: dict[str, Any], source: str = "unknown") -> dict
     holding_profit = _number(raw.get("holding_profit"), market_value - cost_amount)
     calculated_return = (holding_profit / cost_amount * 100) if cost_amount else 0.0
     updated_at = str(raw.get("updated_at") or raw.get("nav_date") or "")
+    nav_date = str(raw.get("nav_date") or "")
     is_qdii = _boolean(raw.get("is_qdii"), False)
-    freshness, stale_data = assess_data_freshness(updated_at, is_qdii=is_qdii)
+    freshness_reference = raw.get("freshness_reference") or nav_date or updated_at
+    freshness, stale_data = assess_data_freshness(
+        freshness_reference, is_qdii=is_qdii
+    )
 
     return {
         "fund_code": str(raw.get("fund_code", "")).strip(),
@@ -118,7 +122,7 @@ def normalize_fund_holding(raw: dict[str, Any], source: str = "unknown") -> dict
         "portfolio_weight": _number(raw.get("portfolio_weight")),
         "source": str(raw.get("source") or source),
         "updated_at": updated_at,
-        "nav_date": str(raw.get("nav_date") or ""),
+        "nav_date": nav_date,
         "estimated_nav_time": str(raw.get("estimated_nav_time") or ""),
         "market_timezone": str(raw.get("market_timezone") or "Asia/Shanghai"),
         "is_qdii": is_qdii,

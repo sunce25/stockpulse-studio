@@ -34,6 +34,8 @@ def _clear_yangjibao_session() -> None:
         "_yjb_qr_url",
         "_yjb_session_token",
         "_yjb_accounts",
+        "_yjb_holdings",
+        "_yjb_holdings_updated_at",
     ):
         st.session_state.pop(key, None)
 
@@ -44,15 +46,24 @@ def _load_yangjibao_accounts(client: YangJiBaoClient) -> None:
 
 
 def render_funds_page() -> None:
-    """Render a demo-only page without accessing any external fund provider."""
+    """Render normalized real holdings when explicitly synchronized, else Demo."""
     st.markdown("<div class='main-title'>💰 我的基金</div>", unsafe_allow_html=True)
     st.markdown(
         "<div class='sub-title'>统一基金数据模型与规则型组合分析骨架</div>",
         unsafe_allow_html=True,
     )
-    st.warning("当前为示例数据，尚未连接养基宝。页面不会读取或上传真实持仓。")
-
-    holdings = get_demo_holdings()
+    session_holdings = st.session_state.get("_yjb_holdings")
+    using_real_holdings = isinstance(session_holdings, list) and bool(session_holdings)
+    if using_real_holdings:
+        holdings = session_holdings
+        updated_at = st.session_state.get("_yjb_holdings_updated_at", "")
+        st.success(
+            "当前展示养基宝只读同步数据。"
+            + (f" 同步时间：{updated_at}" if updated_at else "")
+        )
+    else:
+        holdings = get_demo_holdings()
+        st.warning("当前为示例数据，尚未同步养基宝真实持仓。")
     portfolio = PortfolioAnalyzer().analyze(holdings)
     fund_analyzer = FundAnalyzer()
     analyses = {
@@ -103,7 +114,7 @@ def render_funds_page() -> None:
 
     with detail_tab:
         selected_code = st.selectbox(
-            "选择示例基金",
+            "选择基金" if using_real_holdings else "选择示例基金",
             [item["fund_code"] for item in holdings],
             format_func=lambda code: next(
                 item["fund_name"] for item in holdings if item["fund_code"] == code
@@ -141,7 +152,7 @@ def render_funds_page() -> None:
         )
 
         st.warning(
-            "实验性只读连接：当前仅验证扫码登录和账户列表，不读取持仓、不修改养基宝数据。"
+            "实验性只读连接：只读取账户和基金持仓，不会新增、删除、修改持仓，也不会执行交易。"
         )
         if not setting_is_configured("APP_PASSWORD"):
             st.error("为防止公开页面被他人扫码，必须先配置 APP_PASSWORD 才能启用养基宝授权。")
@@ -221,4 +232,37 @@ def render_funds_page() -> None:
                 hide_index=True,
                 width="stretch",
             )
-            st.caption("账户 ID 和 Token 不在页面显示；真实基金持仓同步仍处于关闭状态。")
+            st.caption("账户 ID 和 Token 不在页面显示。")
+
+            selected_account_index = st.selectbox(
+                "选择需要同步的基金账户",
+                options=list(range(len(accounts))),
+                format_func=lambda index: (
+                    f"{accounts[index]['display_name']}"
+                    f"（{accounts[index]['holding_count']} 只）"
+                ),
+            )
+            if st.button(
+                "只读同步该账户持仓",
+                type="primary",
+                use_container_width=True,
+            ):
+                selected_account = accounts[selected_account_index]
+                try:
+                    synchronized = client.get_holdings(
+                        selected_account["account_id"]
+                    )
+                    if not synchronized:
+                        st.warning("该账户没有返回有效基金持仓，请检查养基宝账户。")
+                    else:
+                        st.session_state["_yjb_holdings"] = synchronized
+                        st.session_state["_yjb_holdings_updated_at"] = max(
+                            (
+                                str(item.get("updated_at") or "")
+                                for item in synchronized
+                            ),
+                            default="",
+                        )
+                        st.rerun()
+                except YangJiBaoError as exc:
+                    st.error(str(exc))

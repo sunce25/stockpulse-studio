@@ -40,7 +40,7 @@ LLM_PROVIDER = ""
 LLM_API_KEY = ""
 LLM_MODEL = ""
 
-# 养基宝实验性连接：未完成安全验证前请保持为空
+# 养基宝实验性只读连接：确认接受非公开接口风险后再配置
 YANGJIBAO_TOKEN = ""
 YANGJIBAO_ACCOUNT_ID = ""
 YANGJIBAO_SIGNING_SECRET = ""
@@ -51,4 +51,4 @@ YANGJIBAO_BASE_URL = "https://browser-plug-api.yangjibao.com"
 
 页面和日志只能显示配置状态，不能输出任何 Secret 内容。若凭据曾进入 Git 历史，请立即撤销并重新生成；仅删除当前文件不能消除泄漏风险。
 
-养基宝目前没有已确认的正式公开开发者 API。连接测试只允许 HTTPS，并且必须先设置 `APP_PASSWORD`。不要从公开仓库复制或提交 Token、Cookie、手机号、账户 ID 或签名参数；真实持仓同步在完成接口与授权风险验证前保持关闭。
+养基宝目前没有已确认的正式公开开发者 API。扫码与持仓同步只允许 HTTPS，并且必须先设置 `APP_PASSWORD`。不要从公开仓库复制或提交 Token、Cookie、手机号、账户 ID 或签名参数。同步操作只读取账户和持仓，数据默认保留在当前服务端会话；接口变化时应立即停用并回退到 Demo/文件导入模式。
