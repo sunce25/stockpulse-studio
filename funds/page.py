@@ -164,9 +164,12 @@ def render_funds_page() -> None:
                 "YANGJIBAO_SIGNING_SECRET。页面不会显示其内容。"
             )
         else:
+            st.info(
+                "扫码入口在微信，不在养基宝 App：请先生成二维码，再使用微信的“扫一扫”完成养基宝授权。"
+            )
             action_left, action_right = st.columns(2)
             with action_left:
-                if st.button("生成养基宝登录二维码", use_container_width=True):
+                if st.button("生成微信绑定二维码", use_container_width=True):
                     _clear_yangjibao_session()
                     try:
                         challenge = client.create_qr_login()
@@ -183,12 +186,15 @@ def render_funds_page() -> None:
             qr_id = st.session_state.get("_yjb_qr_id")
             qr_url = st.session_state.get("_yjb_qr_url")
             if qr_id and qr_url:
-                st.markdown("##### 使用养基宝 App 扫码")
+                st.markdown("##### 使用微信扫一扫")
                 try:
                     st.image(_qr_png(qr_url), width=260)
                 except ImportError:
                     st.error("二维码组件尚未安装，请等待应用完成依赖更新。")
-                st.caption("二维码只在服务器本地生成；授权会话不会写入 GitHub。")
+                st.caption(
+                    "操作：打开微信 → 右上角“+” → 扫一扫 → 扫描上方二维码 → 在手机页面确认授权。"
+                    "二维码只在服务器本地生成；授权会话不会写入 GitHub。"
+                )
                 if st.button("我已扫码，检查授权状态", type="primary"):
                     try:
                         login = client.poll_qr_login(qr_id)
@@ -201,7 +207,7 @@ def render_funds_page() -> None:
                             st.session_state.pop("_yjb_qr_url", None)
                             st.rerun()
                         elif login["state"] == "pending":
-                            st.info("尚未完成扫码，请在养基宝 App 中确认后再检查。")
+                            st.info("尚未完成授权，请用微信扫码并在手机页面确认后再检查。")
                         else:
                             st.warning("二维码已失效，请重新生成。")
                     except YangJiBaoError as exc:
