@@ -26,7 +26,7 @@
 
 5. **💰 我的基金（架构骨架）**
    - 使用统一基金持仓模型展示组合资产、收益、仓位、集中度和风险评分。
-   - 默认展示 Demo Data；完成实验性养基宝扫码后，可选择账户并只读同步真实基金持仓。
+   - 默认展示 Demo Data；完成实验性养基宝扫码后，可选择账户并只读同步真实基金持仓。配置 Supabase 后会保存标准化快照和加密只读授权，重新打开页面时自动恢复；数据超过 5 分钟则自动同步，接口异常时回退到最后一次快照。
 
 6. **🧠 AI 投资助手（占位模式）**
    - 已建立 Provider 无关的 Copilot 接口、Prompt 管理与 Structured Context。
@@ -72,6 +72,8 @@ python -m streamlit run app.py
 
 - `config/settings.py`：环境变量优先、兼容 Streamlit Secrets 的统一配置入口。
 - `funds/yangjibao_client.py`：养基宝专属隔离边界；仅允许 HTTPS 下的扫码、账户发现和只读持仓同步。
+- `funds/auth_store.py`：使用服务端派生密钥加密保存最小化只读授权，数据库不出现明文 Token。
+- `funds/snapshot_store.py`：在私有 Supabase 中保存标准化基金快照，刷新或接口故障时恢复。
 - `funds/fund_adapter.py`：跨平台统一基金模型与数据新鲜度。
 - `funds/fund_analyzer.py`、`funds/portfolio_analyzer.py`：纯 Python 规则分析。
 - `ai/context_builder.py`：把规则结果整理为结构化上下文，并预留分析审计记录。
@@ -83,4 +85,4 @@ QDII、海外指数与港股基金的数据模型预留了净值日期、盘中�
 
 复制 `.env.example` 或 `.streamlit/secrets.toml.example` 后在本机填写配置；真实文件不得提交。公开部署前请阅读 [SECURITY.md](SECURITY.md)。
 
-养基宝连接属于实验功能，并非官方公开开发者 API。只有配置 `APP_PASSWORD`、`YANGJIBAO_SIGNING_SECRET` 且接口为 HTTPS 时页面才允许发起扫码和只读同步。扫码取得的 Token 与标准化持仓默认只保留在当前 Streamlit 会话内，不显示、不写日志，也不会自动保存到数据库。StockPulse 不调用养基宝的新增、删除或修改接口。
+养基宝连接属于实验功能，并非官方公开开发者 API。只有配置 `APP_PASSWORD`、`YANGJIBAO_SIGNING_SECRET` 且接口为 HTTPS 时页面才允许发起扫码和只读同步。配置 Supabase 后，扫码取得的只读 Token 与账户 ID 会经过认证加密后保存，标准化持仓保存为独立私有快照；两者都不显示、不写日志，数据库中不会出现明文凭据。StockPulse 不调用养基宝的新增、删除或修改接口。

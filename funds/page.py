@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from io import BytesIO
 
 import pandas as pd
 import streamlit as st
 
-from config.settings import is_configured as setting_is_configured
+from config.settings import get_setting, is_configured as setting_is_configured
+from funds.auth_store import SupabaseYangJiBaoAuthStore, YangJiBaoAuthStoreError
 from funds.fund_adapter import get_demo_holdings
 from funds.fund_analyzer import FundAnalyzer
 from funds.portfolio_analyzer import PortfolioAnalyzer
+from funds.snapshot_store import FundSnapshotError, SupabaseFundSnapshotStore
 from funds.yangjibao_client import YangJiBaoClient, YangJiBaoError
 
 
@@ -45,6 +48,129 @@ def _load_yangjibao_accounts(client: YangJiBaoClient) -> None:
     st.session_state["_yjb_accounts"] = accounts
 
 
+@st.cache_resource(show_spinner=False)
+def _get_snapshot_store(
+    project_url: str, secret_key: str, record_id: str
+) -> SupabaseFundSnapshotStore:
+    return SupabaseFundSnapshotStore(project_url, secret_key, record_id)
+
+
+@st.cache_resource(show_spinner=False)
+def _get_auth_store(
+    project_url: str,
+    secret_key: str,
+    encryption_material: str,
+    record_id: str,
+) -> SupabaseYangJiBaoAuthStore:
+    return SupabaseYangJiBaoAuthStore(
+        project_url, secret_key, encryption_material, record_id
+    )
+
+
+def _fund_snapshot_store() -> SupabaseFundSnapshotStore | None:
+    project_url = get_setting("SUPABASE_URL")
+    secret_key = get_setting("SUPABASE_SECRET_KEY")
+    if not project_url or not secret_key:
+        return None
+    record_id = get_setting(
+        "FUND_SNAPSHOT_RECORD_ID",
+        f"{get_setting('WATCHLIST_RECORD_ID', 'primary')}-funds",
+    )
+    return _get_snapshot_store(project_url, secret_key, record_id)
+
+
+def _yangjibao_auth_store() -> SupabaseYangJiBaoAuthStore | None:
+    project_url = get_setting("SUPABASE_URL")
+    secret_key = get_setting("SUPABASE_SECRET_KEY")
+    app_password = get_setting("APP_PASSWORD")
+    if not project_url or not secret_key or not app_password:
+        return None
+    record_id = get_setting(
+        "YANGJIBAO_AUTH_RECORD_ID",
+        f"{get_setting('WATCHLIST_RECORD_ID', 'primary')}-yangjibao-auth",
+    )
+    return _get_auth_store(
+        project_url,
+        secret_key,
+        f"{secret_key}\0{app_password}",
+        record_id,
+    )
+
+
+def _snapshot_is_stale(updated_at: str, max_age_seconds: int = 300) -> bool:
+    try:
+        parsed = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+        return age < 0 or age > max_age_seconds
+    except (TypeError, ValueError):
+        return True
+
+
+def _restore_fund_snapshot(store: SupabaseFundSnapshotStore | None) -> None:
+    if st.session_state.get("_yjb_snapshot_checked"):
+        return
+    st.session_state["_yjb_snapshot_checked"] = True
+    if store is None:
+        return
+    try:
+        snapshot = store.load()
+    except FundSnapshotError as exc:
+        st.session_state["_yjb_snapshot_error"] = str(exc)
+        return
+    if snapshot and snapshot.get("holdings"):
+        st.session_state["_yjb_holdings"] = snapshot["holdings"]
+        st.session_state["_yjb_holdings_updated_at"] = snapshot.get("updated_at", "")
+        st.session_state["_yjb_holdings_restored"] = True
+
+
+def _restore_yangjibao_authorization(
+    auth_store: SupabaseYangJiBaoAuthStore | None,
+    snapshot_store: SupabaseFundSnapshotStore | None,
+) -> None:
+    if st.session_state.get("_yjb_auth_checked") or auth_store is None:
+        return
+    st.session_state["_yjb_auth_checked"] = True
+    try:
+        credentials = auth_store.load()
+    except YangJiBaoAuthStoreError as exc:
+        st.session_state["_yjb_auth_error"] = str(exc)
+        return
+    if not credentials:
+        return
+
+    st.session_state["_yjb_session_token"] = credentials["token"]
+    st.session_state["_yjb_accounts"] = [
+        {
+            "account_id": credentials["account_id"],
+            "display_name": credentials["display_name"],
+            "holding_count": credentials["holding_count"],
+        }
+    ]
+    st.session_state["_yjb_auth_restored"] = True
+    updated_at = st.session_state.get("_yjb_holdings_updated_at", "")
+    if not _snapshot_is_stale(updated_at):
+        return
+
+    try:
+        client = YangJiBaoClient(token=credentials["token"])
+        holdings = client.get_holdings(credentials["account_id"])
+        if not holdings:
+            return
+        refreshed_at = max(
+            (str(item.get("updated_at") or "") for item in holdings), default=""
+        )
+        st.session_state["_yjb_holdings"] = holdings
+        st.session_state["_yjb_holdings_updated_at"] = refreshed_at
+        st.session_state.pop("_yjb_holdings_restored", None)
+        st.session_state["_yjb_auto_synced"] = True
+        if snapshot_store is not None:
+            snapshot_store.save(holdings, refreshed_at)
+    except (YangJiBaoError, FundSnapshotError) as exc:
+        st.session_state["_yjb_auto_sync_error"] = str(exc)
+
+
 def render_funds_page() -> None:
     """Render normalized real holdings when explicitly synchronized, else Demo."""
     st.markdown("<div class='main-title'>💰 我的基金</div>", unsafe_allow_html=True)
@@ -52,6 +178,10 @@ def render_funds_page() -> None:
         "<div class='sub-title'>统一基金数据模型与规则型组合分析骨架</div>",
         unsafe_allow_html=True,
     )
+    snapshot_store = _fund_snapshot_store()
+    auth_store = _yangjibao_auth_store()
+    _restore_fund_snapshot(snapshot_store)
+    _restore_yangjibao_authorization(auth_store, snapshot_store)
     session_holdings = st.session_state.get("_yjb_holdings")
     using_real_holdings = isinstance(session_holdings, list) and bool(session_holdings)
     if using_real_holdings:
@@ -61,6 +191,10 @@ def render_funds_page() -> None:
             "当前展示养基宝只读同步数据。"
             + (f" 同步时间：{updated_at}" if updated_at else "")
         )
+        if st.session_state.get("_yjb_holdings_restored"):
+            st.caption("该数据已从私有 Supabase 快照恢复；刷新网页不会再退回示例数据。")
+        elif st.session_state.get("_yjb_auto_synced"):
+            st.caption("已使用服务端加密授权自动同步养基宝最新持仓。")
     else:
         holdings = get_demo_holdings()
         st.warning("当前为示例数据，尚未同步养基宝真实持仓。")
@@ -133,6 +267,21 @@ def render_funds_page() -> None:
             st.info("该示例为 QDII：估算净值不等于最终确认净值，并可能受时区、汇率和净值延迟影响。")
 
     with source_tab:
+        snapshot_error = st.session_state.pop("_yjb_snapshot_error", "")
+        if snapshot_error:
+            st.warning(snapshot_error)
+        auth_error = st.session_state.pop("_yjb_auth_error", "")
+        if auth_error:
+            st.warning(auth_error)
+        auto_sync_error = st.session_state.pop("_yjb_auto_sync_error", "")
+        if auto_sync_error:
+            st.warning(f"自动同步失败，当前继续展示最后一次快照。{auto_sync_error}")
+        if snapshot_store is None:
+            st.info("未配置 Supabase，基金数据只能保留在当前网页会话中。")
+        else:
+            st.caption("已启用私有基金快照：仅保存标准化持仓，不保存养基宝 Token、Cookie 或账户 ID。")
+        if auth_store is not None:
+            st.caption("授权将先加密再保存；重新打开网页可自动恢复，明文 Token 不会写入数据库。")
         session_token = st.session_state.get("_yjb_session_token")
         client = YangJiBaoClient(token=session_token) if session_token else YangJiBaoClient()
         config_status = client.configuration_status()
@@ -146,7 +295,9 @@ def render_funds_page() -> None:
         )
         status_cols[2].metric(
             "授权状态",
-            "本次会话已授权"
+            "已加密恢复"
+            if st.session_state.get("_yjb_auth_restored")
+            else "本次会话已授权"
             if session_token
             else "已配置" if config_status["token_configured"] else "未授权",
         )
@@ -179,8 +330,15 @@ def render_funds_page() -> None:
                     except YangJiBaoError as exc:
                         st.error(str(exc))
             with action_right:
-                if st.button("清除本次授权", use_container_width=True):
+                if st.button("退出并清除已保存授权", use_container_width=True):
+                    if auth_store is not None:
+                        try:
+                            auth_store.delete()
+                        except YangJiBaoAuthStoreError as exc:
+                            st.error(str(exc))
+                            st.stop()
                     _clear_yangjibao_session()
+                    st.session_state["_yjb_auth_checked"] = True
                     st.rerun()
 
             qr_id = st.session_state.get("_yjb_qr_id")
@@ -269,6 +427,26 @@ def render_funds_page() -> None:
                             ),
                             default="",
                         )
+                        st.session_state.pop("_yjb_holdings_restored", None)
+                        if snapshot_store is not None:
+                            try:
+                                snapshot_store.save(
+                                    synchronized,
+                                    st.session_state["_yjb_holdings_updated_at"],
+                                )
+                            except FundSnapshotError as exc:
+                                st.warning(str(exc))
+                        if auth_store is not None and session_token:
+                            try:
+                                auth_store.save(
+                                    session_token,
+                                    selected_account["account_id"],
+                                    selected_account["display_name"],
+                                    selected_account["holding_count"],
+                                )
+                                st.session_state["_yjb_auth_restored"] = True
+                            except YangJiBaoAuthStoreError as exc:
+                                st.warning(str(exc))
                         st.rerun()
                 except YangJiBaoError as exc:
                     st.error(str(exc))

@@ -1,4 +1,5 @@
 import os
+import copy
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -6,6 +7,7 @@ from unittest.mock import patch
 from ai.context_builder import ANALYSIS_HISTORY_FIELDS, build_analysis_context
 from ai.copilot import AICopilot, NOT_CONFIGURED_MESSAGE
 from config.settings import get_setting
+from funds.auth_store import SupabaseYangJiBaoAuthStore
 from funds.fund_adapter import (
     FUND_HOLDING_FIELDS,
     assess_data_freshness,
@@ -14,6 +16,7 @@ from funds.fund_adapter import (
 )
 from funds.fund_analyzer import FundAnalyzer
 from funds.portfolio_analyzer import PortfolioAnalyzer
+from funds.snapshot_store import FundSnapshotError, SupabaseFundSnapshotStore
 from funds.yangjibao_client import YangJiBaoClient, YangJiBaoError
 
 
@@ -28,6 +31,100 @@ class SettingsTests(unittest.TestCase):
 
 
 class FundArchitectureTests(unittest.TestCase):
+    def test_yangjibao_authorization_is_encrypted_at_rest(self):
+        class FakeResponse:
+            def __init__(self, payload=None):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return copy.deepcopy(self.payload)
+
+        class FakeSession:
+            def __init__(self):
+                self.rows = {}
+
+            def get(self, _url, params, headers, timeout):
+                _ = (headers, timeout)
+                record_id = params["id"].removeprefix("eq.")
+                payload = self.rows.get(record_id)
+                return FakeResponse([] if payload is None else [{"payload": payload}])
+
+            def post(self, _url, params, json, headers, timeout):
+                _ = (params, headers, timeout)
+                self.rows[json["id"]] = copy.deepcopy(json["payload"])
+                return FakeResponse()
+
+        session = FakeSession()
+        store = SupabaseYangJiBaoAuthStore(
+            "https://example.supabase.co",
+            "sb_secret_test",
+            "high-entropy-server-material",
+            session=session,
+        )
+        store.save("private-token", "account-1", "长期账户", 3)
+
+        persisted_text = str(session.rows["primary-yangjibao-auth"])
+        self.assertNotIn("private-token", persisted_text)
+        self.assertNotIn("account-1", persisted_text)
+        self.assertEqual(store.load()["token"], "private-token")
+        self.assertEqual(store.load()["account_id"], "account-1")
+
+    def test_fund_snapshot_round_trip_excludes_provider_credentials(self):
+        class FakeResponse:
+            def __init__(self, payload=None):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return copy.deepcopy(self.payload)
+
+        class FakeSession:
+            def __init__(self):
+                self.rows = {}
+
+            def get(self, _url, params, headers, timeout):
+                _ = (headers, timeout)
+                record_id = params["id"].removeprefix("eq.")
+                payload = self.rows.get(record_id)
+                return FakeResponse([] if payload is None else [{"payload": payload}])
+
+            def post(self, _url, params, json, headers, timeout):
+                _ = (params, headers, timeout)
+                self.rows[json["id"]] = copy.deepcopy(json["payload"])
+                return FakeResponse()
+
+        session = FakeSession()
+        store = SupabaseFundSnapshotStore(
+            "https://example.supabase.co",
+            "sb_secret_test",
+            session=session,
+        )
+        store.save(get_demo_holdings(), "2026-09-01T10:00:00+00:00")
+        restored = store.load()
+
+        self.assertEqual(len(restored["holdings"]), 3)
+        self.assertEqual(restored["updated_at"], "2026-09-01T10:00:00+00:00")
+        persisted_text = str(session.rows["primary-funds"]).lower()
+        self.assertNotIn("token", persisted_text)
+        self.assertNotIn("cookie", persisted_text)
+        self.assertNotIn("account_id", persisted_text)
+
+    def test_fund_snapshot_rejects_credential_fields(self):
+        holding = get_demo_holdings()[0]
+        holding["access_token"] = "must-not-persist"
+        store = SupabaseFundSnapshotStore(
+            "https://example.supabase.co",
+            "sb_secret_test",
+            session=object(),
+        )
+        with self.assertRaises(FundSnapshotError):
+            store.save([holding])
+
     def test_normalized_model_contains_required_and_qdii_fields(self):
         holding = normalize_fund_holding({"fund_code": "X", "shares": 10, "latest_nav": 2})
         self.assertTrue(set(FUND_HOLDING_FIELDS).issubset(holding))
