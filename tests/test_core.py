@@ -67,6 +67,64 @@ class ScreenerTests(unittest.TestCase):
 
 
 class BatchQuoteTests(unittest.TestCase):
+    @staticmethod
+    def _quote_response(symbol="600519", name="贵州茅台", price="1500"):
+        fields = [""] * 46
+        fields[1], fields[2], fields[3], fields[4], fields[5] = (
+            name,
+            symbol,
+            price,
+            "1490",
+            "1495",
+        )
+        fields[6], fields[31], fields[32], fields[33], fields[34] = (
+            "100",
+            "10",
+            "0.67",
+            "1510",
+            "1480",
+        )
+        return types.SimpleNamespace(
+            content=(f'v_sh{symbol}="' + "~".join(fields) + '";').encode("gbk")
+        )
+
+    def test_realtime_quote_uses_short_lived_cache(self):
+        adapter = DataAdapter()
+        response = self._quote_response()
+        with patch("modules.data_adapter.requests.get", return_value=response) as request_get:
+            first = adapter.get_realtime_quote("600519", "A股")
+            second = adapter.get_realtime_quote("600519", "A股")
+
+        self.assertEqual(first["price"], 1500.0)
+        self.assertEqual(second, first)
+        request_get.assert_called_once()
+
+    def test_batch_quotes_use_short_lived_cache(self):
+        adapter = DataAdapter()
+        response = self._quote_response()
+        items = [{"symbol": "600519", "market": "A股", "name": "贵州茅台"}]
+        with patch("modules.data_adapter.requests.get", return_value=response) as request_get:
+            first = adapter.get_batch_quotes(items)
+            second = adapter.get_batch_quotes(items)
+
+        self.assertEqual(second, first)
+        request_get.assert_called_once()
+
+    def test_kline_cache_returns_defensive_copies(self):
+        adapter = DataAdapter()
+        source = make_kline(10)
+        with patch.object(
+            adapter,
+            "_get_kline_data_uncached",
+            return_value=source,
+        ) as fetch:
+            first = adapter.get_kline_data("600519", "A股", limit=10)
+            first.loc[0, "close"] = -999
+            second = adapter.get_kline_data("600519", "A股", limit=10)
+
+        self.assertNotEqual(second.loc[0, "close"], -999)
+        fetch.assert_called_once()
+
     def test_newer_us_extended_quote_overlays_regular_close(self):
         adapter = DataAdapter()
         base = {

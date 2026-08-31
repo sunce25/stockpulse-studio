@@ -76,7 +76,21 @@ class DataAdapter:
             "Referer": "https://finance.sina.com.cn"
         }
         self.cache = {}
-        self.cache_ttl = 30  # 秒
+        self.cache_ttl = 30  # 秒，盘前/盘后分钟行情
+        self.quote_cache_ttl = 20
+        self.kline_cache_ttl = 300
+
+    def _store_bounded_cache(self, key: str, value, max_entries: int = 128) -> None:
+        """Store a cache item without allowing a long-lived app to grow forever."""
+        prefix = key.split(":", 1)[0] + ":"
+        matching_keys = [item for item in self.cache if str(item).startswith(prefix)]
+        if len(matching_keys) >= max_entries:
+            oldest_key = min(
+                matching_keys,
+                key=lambda item: float(self.cache[item][0]),
+            )
+            self.cache.pop(oldest_key, None)
+        self.cache[key] = (time.time(), value)
 
     @staticmethod
     def _to_float(value, default: float = 0.0) -> float:
@@ -119,6 +133,16 @@ class DataAdapter:
         sym = symbol.strip().upper()
         if market == "auto":
             market = self.detect_market(sym)
+
+        cache_key = f"quote:{market}:{sym}"
+        cached = self.cache.get(cache_key)
+        if cached and time.time() - cached[0] < self.quote_cache_ttl:
+            return dict(cached[1])
+
+        def remember(quote_data: dict) -> dict:
+            snapshot = dict(quote_data)
+            self._store_bounded_cache(cache_key, snapshot)
+            return dict(snapshot)
         
         tc_code = self.get_tencent_code(sym, market)
         url = f"https://qt.gtimg.cn/q={tc_code}"
@@ -127,11 +151,11 @@ class DataAdapter:
             r = requests.get(url, headers=self.headers, timeout=4)
             text = r.content.decode("gbk", errors="ignore")
             if not text or "~" not in text:
-                return self._fallback_quote(sym, market)
+                return remember(self._fallback_quote(sym, market))
             
             parts = text.split("~")
             if len(parts) < 35:
-                return self._fallback_quote(sym, market)
+                return remember(self._fallback_quote(sym, market))
             
             name = parts[1] if parts[1] else sym
             price = self._to_float(parts[3])
@@ -166,9 +190,9 @@ class DataAdapter:
                 "session": "常规交易时段",
                 "is_extended_hours": False,
             }
-            return self._apply_us_extended_quote(quote)
-        except Exception as e:
-            return self._fallback_quote(sym, market)
+            return remember(self._apply_us_extended_quote(quote))
+        except Exception:
+            return remember(self._fallback_quote(sym, market))
 
     @staticmethod
     def _us_session_label(timestamp: int, timezone_name: str = "America/New_York") -> str:
@@ -269,7 +293,7 @@ class DataAdapter:
     def clear_quote_cache(self) -> None:
         """Clear short-lived quote caches without touching the hourly FX cache."""
         for key in list(self.cache):
-            if str(key).startswith("us_extended:"):
+            if str(key).startswith(("us_extended:", "quote:", "batch_quotes:")):
                 self.cache.pop(key, None)
 
     def _apply_us_extended_quotes(self, quotes: list[dict]) -> list[dict]:
@@ -329,6 +353,21 @@ class DataAdapter:
         """批量获取实时行情列表 (items 为 [{'symbol': 'NVDA', 'market': '美股'}, ...])"""
         if not items:
             return []
+
+        signature = [
+            (
+                str(item.get("symbol", "")).strip().upper(),
+                str(item.get("market", "auto")),
+                str(item.get("name", "")),
+            )
+            for item in items
+        ]
+        cache_key = "batch_quotes:" + json.dumps(
+            signature, ensure_ascii=False, separators=(",", ":")
+        )
+        cached = self.cache.get(cache_key)
+        if cached and time.time() - cached[0] < self.quote_cache_ttl:
+            return [dict(quote) for quote in cached[1]]
         
         tc_codes = []
         item_map = {}
@@ -391,7 +430,10 @@ class DataAdapter:
                 quote = self.get_realtime_quote(item["symbol"], item.get("market", "auto"))
                 quote["extra"] = item
             results.append(quote)
-        return self._apply_us_extended_quotes(results)
+        results = self._apply_us_extended_quotes(results)
+        snapshots = [dict(quote) for quote in results]
+        self._store_bounded_cache(cache_key, snapshots, max_entries=32)
+        return [dict(quote) for quote in snapshots]
 
     def get_usd_cny_rate(self) -> float:
         """Return a cached USD/CNY rate with Tencent and public-API fallbacks."""
@@ -443,7 +485,46 @@ class DataAdapter:
         self.cache[cache_key] = (time.time(), rate, source)
         return rate
 
-    def get_kline_data(self, symbol: str, market: str = "auto", period: str = "daily", limit: int = 360) -> pd.DataFrame:
+    def get_kline_data(
+        self,
+        symbol: str,
+        market: str = "auto",
+        period: str = "daily",
+        limit: int = 360,
+    ) -> pd.DataFrame:
+        """Return a defensive copy of short-lived cached historical data."""
+        sym = symbol.strip().upper()
+        normalized_market = self.detect_market(sym) if market == "auto" else market
+        cache_key = f"kline:{normalized_market}:{sym}:{period}:{int(limit)}"
+        cached = self.cache.get(cache_key)
+        if cached:
+            cached_ttl = cached[2] if len(cached) > 2 else self.kline_cache_ttl
+            if time.time() - cached[0] < cached_ttl:
+                return cached[1].copy(deep=True)
+
+        result = self._get_kline_data_uncached(
+            sym,
+            normalized_market,
+            period=period,
+            limit=limit,
+        )
+        if result is None:
+            result = pd.DataFrame(
+                columns=["date", "open", "close", "high", "low", "volume"]
+            )
+        snapshot = result.copy(deep=True)
+        ttl = self.kline_cache_ttl if not snapshot.empty else 20
+        matching_keys = [key for key in self.cache if str(key).startswith("kline:")]
+        if len(matching_keys) >= 96:
+            oldest_key = min(
+                matching_keys,
+                key=lambda key: float(self.cache[key][0]),
+            )
+            self.cache.pop(oldest_key, None)
+        self.cache[cache_key] = (time.time(), snapshot, ttl)
+        return snapshot.copy(deep=True)
+
+    def _get_kline_data_uncached(self, symbol: str, market: str = "auto", period: str = "daily", limit: int = 360) -> pd.DataFrame:
         """
         获取历史K线数据
         period: 'daily' (日K), 'weekly' (周K), 'monthly' (月K)

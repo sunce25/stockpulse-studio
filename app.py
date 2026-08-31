@@ -8,24 +8,15 @@ import pandas as pd
 import numpy as np
 import datetime
 import hmac
-import plotly.graph_objects as go
-
-try:
-    from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder
-except ImportError:
-    AgGrid = DataReturnMode = GridOptionsBuilder = None
 
 # 导入自定义模块
 from modules.data_adapter import DataAdapter, POPULAR_STOCKS
 from modules.indicators import add_all_indicators
-from modules.chart_builder import create_stock_chart
 from modules.cloud_storage import create_watchlist_manager
 from modules.screener import StockScreener
 from modules.analyzer import TechnicalAnalyzer
 from modules.watchlist import has_active_position
 from config.settings import get_setting
-from funds.page import render_funds_page
-from ai.page import render_ai_copilot_page
 
 # 页面基础配置
 st.set_page_config(
@@ -143,7 +134,8 @@ require_app_password()
 
 
 # 初始化单例服务
-SERVICE_CACHE_VERSION = "2026-08-31-live-quotes-v4"
+SERVICE_CACHE_VERSION = "2026-09-01-performance-v1"
+WATCHLIST_CACHE_VERSION = "2026-09-01-watchlist-v1"
 
 
 @st.cache_resource
@@ -161,10 +153,29 @@ supabase_url = get_setting("SUPABASE_URL")
 supabase_secret_key = get_setting("SUPABASE_SECRET_KEY")
 watchlist_record_id = get_setting("WATCHLIST_RECORD_ID", "primary")
 cloud_config_incomplete = bool(supabase_url) != bool(supabase_secret_key)
-watchlist_mgr = create_watchlist_manager(
-    supabase_url=supabase_url,
-    supabase_secret_key=supabase_secret_key,
-    record_id=watchlist_record_id,
+
+
+@st.cache_resource
+def get_watchlist_service(
+    cache_version: str,
+    configured_supabase_url: str,
+    configured_supabase_secret_key: str,
+    configured_record_id: str,
+):
+    """Keep one persistence client across Streamlit widget reruns."""
+    _ = cache_version
+    return create_watchlist_manager(
+        supabase_url=configured_supabase_url,
+        supabase_secret_key=configured_supabase_secret_key,
+        record_id=configured_record_id,
+    )
+
+
+watchlist_mgr = get_watchlist_service(
+    WATCHLIST_CACHE_VERSION,
+    supabase_url,
+    supabase_secret_key,
+    watchlist_record_id,
 )
 watchlist_mgr.reload()
 
@@ -384,6 +395,9 @@ with st.sidebar:
 # 页面 1：📈 个股深度走势看板
 # -------------------------------------------------------------
 if nav_option == "📈 个股深度走势":
+    # Plotly is one of the heaviest imports; only load it on the chart page.
+    from modules.chart_builder import create_stock_chart
+
     st.markdown("<div class='main-title'>📈 个股深度走势与技术指标看板</div>", unsafe_allow_html=True)
     st.markdown("<div class='sub-title'>支持多市场（A股/美股/ETF）多周期 K 线、主副图技术指标自由叠加与区间量价分析</div>", unsafe_allow_html=True)
 
@@ -712,6 +726,13 @@ elif nav_option == "🔍 多维策略选股":
 # 页面 3：⭐ 跨市场自选股与组合管理
 # -------------------------------------------------------------
 elif nav_option == "⭐ 自选股与组合":
+    # The interactive grid is only needed on this page. Lazy import keeps fund
+    # and analysis pages responsive after a cold Streamlit Cloud start.
+    try:
+        from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder
+    except ImportError:
+        AgGrid = DataReturnMode = GridOptionsBuilder = None
+
     st.markdown(
         """
         <style>
@@ -1259,6 +1280,8 @@ elif nav_option == "⭐ 自选股与组合":
 # 页面 4：💰 我的基金（示例数据骨架）
 # -------------------------------------------------------------
 elif nav_option == "💰 我的基金":
+    from funds.page import render_funds_page
+
     render_funds_page()
 
 
@@ -1356,6 +1379,8 @@ elif nav_option == "🤖 智能形态诊断":
 # 页面 6：🧠 AI 投资助手（LLM 占位接口）
 # -------------------------------------------------------------
 elif nav_option == "🧠 AI 投资助手":
+    from ai.page import render_ai_copilot_page
+
     render_ai_copilot_page()
 
 

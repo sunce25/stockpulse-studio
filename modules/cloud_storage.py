@@ -109,7 +109,7 @@ class CloudBackedWatchlistManager(WatchlistManager):
         project_url: str = "",
         secret_key: str = "",
         record_id: str = "primary",
-        refresh_interval: float = 1.5,
+        refresh_interval: float = 30.0,
         session=None,
     ):
         self.remote_store = SupabaseJsonStore(
