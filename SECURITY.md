@@ -8,11 +8,14 @@ StockPulse Studio 可以公开代码，但密钥、登录凭据和个人投资�
 - `.streamlit/secrets.toml`
 - LLM API Key
 - 养基宝 Token、Cookie、账号 ID 或原始响应
+- 养基宝签名参数、二维码授权内容或扫码状态响应
 - Supabase Secret / Service Role Key 与私有数据库 URL
 - `credentials.json`、`secrets.json`、私钥和证书
 - `data/watchlist.json` 或其他包含个人持仓、成本、份额的数据
 
 所有敏感配置只能通过环境变量或 Streamlit Secrets 提供。应用只显示“已配置 / 未配置”，不得显示 Key、Token 或 Cookie 内容。
+
+养基宝实验连接必须使用 HTTPS，并要求应用已配置访问密码。扫码 Token 默认只存在于当前服务端会话；禁止通过调试日志、URL 参数、浏览器存储或第三方二维码生成服务传递。
 
 ## 如果密钥曾进入 Git 历史
 

@@ -14,7 +14,7 @@ from funds.fund_adapter import (
 )
 from funds.fund_analyzer import FundAnalyzer
 from funds.portfolio_analyzer import PortfolioAnalyzer
-from funds.yangjibao_client import YangJiBaoClient
+from funds.yangjibao_client import YangJiBaoClient, YangJiBaoError
 
 
 class SettingsTests(unittest.TestCase):
@@ -80,6 +80,78 @@ class FundArchitectureTests(unittest.TestCase):
         copilot = AICopilot(provider="", api_key="", model="")
         self.assertEqual(copilot.answer_question({}, "test"), NOT_CONFIGURED_MESSAGE)
         self.assertNotIn("api_key", copilot.configuration_status())
+
+    def test_yangjibao_blocks_insecure_transport(self):
+        class FailIfCalledSession:
+            def get(self, *args, **kwargs):
+                raise AssertionError("HTTP request should have been blocked")
+
+        client = YangJiBaoClient(
+            signing_secret="test-signing-material",
+            base_url="http://example.com",
+            session=FailIfCalledSession(),
+        )
+        self.assertFalse(client.uses_secure_transport())
+        with self.assertRaises(YangJiBaoError):
+            client.create_qr_login()
+
+    def test_yangjibao_qr_and_accounts_are_sanitized(self):
+        class FakeResponse:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, params, headers, timeout):
+                self.calls.append((url, params, headers, timeout))
+                if url.endswith("/qr_code"):
+                    return FakeResponse(
+                        {"code": 200, "data": {"id": "qr-123", "url": "yjb://login"}}
+                    )
+                if url.endswith("/qr_code_state/qr-123"):
+                    return FakeResponse(
+                        {"code": 200, "data": {"state": 2, "token": "private-token"}}
+                    )
+                return FakeResponse(
+                    {
+                        "code": 200,
+                        "data": {
+                            "list": [
+                                {"id": "account-1", "title": "长期账户", "count": 3}
+                            ]
+                        },
+                    }
+                )
+
+        session = FakeSession()
+        client = YangJiBaoClient(
+            token="",
+            signing_secret="test-signing-material",
+            base_url="https://example.com",
+            session=session,
+        )
+        challenge = client.create_qr_login()
+        login = client.poll_qr_login(challenge["id"])
+        authorized = YangJiBaoClient(
+            token=login["token"],
+            signing_secret="test-signing-material",
+            base_url="https://example.com",
+            session=session,
+        )
+        accounts = authorized.get_accounts()
+
+        self.assertEqual(login["state"], "authorized")
+        self.assertEqual(accounts[0]["display_name"], "长期账户")
+        self.assertEqual(set(accounts[0]), {"account_id", "display_name", "holding_count"})
+        self.assertNotIn("private-token", str(authorized.configuration_status()))
 
 
 if __name__ == "__main__":

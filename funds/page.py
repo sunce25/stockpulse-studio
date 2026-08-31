@@ -2,17 +2,45 @@
 
 from __future__ import annotations
 
+from io import BytesIO
+
 import pandas as pd
 import streamlit as st
 
+from config.settings import is_configured as setting_is_configured
 from funds.fund_adapter import get_demo_holdings
 from funds.fund_analyzer import FundAnalyzer
 from funds.portfolio_analyzer import PortfolioAnalyzer
-from funds.yangjibao_client import YangJiBaoClient
+from funds.yangjibao_client import YangJiBaoClient, YangJiBaoError
 
 
 def _currency(value: float) -> str:
     return f"¥{value:,.2f}"
+
+
+def _qr_png(content: str) -> bytes:
+    """Render QR content locally so authorization data is not sent elsewhere."""
+    import qrcode
+
+    image = qrcode.make(content)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _clear_yangjibao_session() -> None:
+    for key in (
+        "_yjb_qr_id",
+        "_yjb_qr_url",
+        "_yjb_session_token",
+        "_yjb_accounts",
+    ):
+        st.session_state.pop(key, None)
+
+
+def _load_yangjibao_accounts(client: YangJiBaoClient) -> None:
+    accounts = client.get_accounts()
+    st.session_state["_yjb_accounts"] = accounts
 
 
 def render_funds_page() -> None:
@@ -94,10 +122,103 @@ def render_funds_page() -> None:
             st.info("该示例为 QDII：估算净值不等于最终确认净值，并可能受时区、汇率和净值延迟影响。")
 
     with source_tab:
-        client = YangJiBaoClient()
+        session_token = st.session_state.get("_yjb_session_token")
+        client = YangJiBaoClient(token=session_token) if session_token else YangJiBaoClient()
+        config_status = client.configuration_status()
         st.markdown("#### 养基宝连接状态")
         status_cols = st.columns(3)
-        status_cols[0].metric("凭据配置", "已配置" if client.is_configured() else "未配置")
-        status_cols[1].metric("接口状态", "未连接")
-        status_cols[2].metric("当前数据源", "Demo")
-        st.info("养基宝客户端目前仅为隔离接口骨架，不会发起真实请求。Token、Cookie 和账号 ID 不会显示在页面中。")
+        status_cols[0].metric(
+            "连接参数", "已配置" if config_status["signing_configured"] else "未配置"
+        )
+        status_cols[1].metric(
+            "安全传输", "HTTPS" if config_status["secure_transport"] else "已阻止"
+        )
+        status_cols[2].metric(
+            "授权状态",
+            "本次会话已授权"
+            if session_token
+            else "已配置" if config_status["token_configured"] else "未授权",
+        )
+
+        st.warning(
+            "实验性只读连接：当前仅验证扫码登录和账户列表，不读取持仓、不修改养基宝数据。"
+        )
+        if not setting_is_configured("APP_PASSWORD"):
+            st.error("为防止公开页面被他人扫码，必须先配置 APP_PASSWORD 才能启用养基宝授权。")
+        elif not config_status["secure_transport"]:
+            st.error("当前接口地址不是 HTTPS，StockPulse 已阻止发送任何授权信息。")
+        elif not config_status["signing_configured"]:
+            st.info(
+                "连接测试尚未启用：请先在 Streamlit Secrets 中配置 "
+                "YANGJIBAO_SIGNING_SECRET。页面不会显示其内容。"
+            )
+        else:
+            action_left, action_right = st.columns(2)
+            with action_left:
+                if st.button("生成养基宝登录二维码", use_container_width=True):
+                    _clear_yangjibao_session()
+                    try:
+                        challenge = client.create_qr_login()
+                        st.session_state["_yjb_qr_id"] = challenge["id"]
+                        st.session_state["_yjb_qr_url"] = challenge["url"]
+                        st.rerun()
+                    except YangJiBaoError as exc:
+                        st.error(str(exc))
+            with action_right:
+                if st.button("清除本次授权", use_container_width=True):
+                    _clear_yangjibao_session()
+                    st.rerun()
+
+            qr_id = st.session_state.get("_yjb_qr_id")
+            qr_url = st.session_state.get("_yjb_qr_url")
+            if qr_id and qr_url:
+                st.markdown("##### 使用养基宝 App 扫码")
+                try:
+                    st.image(_qr_png(qr_url), width=260)
+                except ImportError:
+                    st.error("二维码组件尚未安装，请等待应用完成依赖更新。")
+                st.caption("二维码只在服务器本地生成；授权会话不会写入 GitHub。")
+                if st.button("我已扫码，检查授权状态", type="primary"):
+                    try:
+                        login = client.poll_qr_login(qr_id)
+                        if login["state"] == "authorized":
+                            token = login["token"]
+                            authorized_client = YangJiBaoClient(token=token)
+                            _load_yangjibao_accounts(authorized_client)
+                            st.session_state["_yjb_session_token"] = token
+                            st.session_state.pop("_yjb_qr_id", None)
+                            st.session_state.pop("_yjb_qr_url", None)
+                            st.rerun()
+                        elif login["state"] == "pending":
+                            st.info("尚未完成扫码，请在养基宝 App 中确认后再检查。")
+                        else:
+                            st.warning("二维码已失效，请重新生成。")
+                    except YangJiBaoError as exc:
+                        st.error(str(exc))
+
+            if config_status["token_configured"] and not session_token:
+                if st.button("验证 Secrets 中已配置的 Token"):
+                    try:
+                        _load_yangjibao_accounts(client)
+                        st.success("连接成功，已读取账户列表。")
+                    except YangJiBaoError as exc:
+                        st.error(str(exc))
+
+        accounts = st.session_state.get("_yjb_accounts", [])
+        if accounts:
+            st.success(f"养基宝连接测试成功，共发现 {len(accounts)} 个基金账户。")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "账户": item["display_name"],
+                            "基金数量": item["holding_count"],
+                            "状态": "可读取",
+                        }
+                        for item in accounts
+                    ]
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+            st.caption("账户 ID 和 Token 不在页面显示；真实基金持仓同步仍处于关闭状态。")
