@@ -1,6 +1,6 @@
-# StockPulse Studio 智能股票趋势可视化与多维选股系统
+# StockPulse Studio · 个人 AI 投资分析工作台
 
-一个专为个人投资者与量化爱好者打造的现代中文股票趋势分析与多维智能选股工作台。
+一个面向个人投资者的股票、基金、组合风险与 AI 解释工作台。StockPulse 只提供决策支持，不执行交易、不自动下单、不连接券商交易执行。
 
 ---
 
@@ -24,6 +24,14 @@
    - 自动扫描均线排列、量价配合、超买超卖，生成技术健康度评分 (0-100)。
    - 智能测算预估关键阻力位与支撑位，输出操作建议参考。
 
+5. **💰 我的基金（架构骨架）**
+   - 使用统一基金持仓模型展示组合资产、收益、仓位、集中度和风险评分。
+   - 当前明确使用 Demo Data，尚未连接养基宝，也不会读取真实基金持仓。
+
+6. **🧠 AI 投资助手（占位模式）**
+   - 已建立 Provider 无关的 Copilot 接口、Prompt 管理与 Structured Context。
+   - 当前不会调用 OpenAI、Gemini、Claude、DeepSeek 或其他 LLM API。
+
 ---
 
 ## 🚀 启动与运行
@@ -40,3 +48,37 @@ python -m streamlit run app.py
 ### 公网托管
 
 项目支持使用 Supabase 保存持仓数据，并部署到 Streamlit Community Cloud。详见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+
+## AI 与基金分析扩展架构
+
+```text
+养基宝 / 其他基金源       行情数据
+          \               /
+           标准化数据层
+                 ↓
+        Python / Quant Engine
+   （收益、回撤、波动、仓位、集中度、风险）
+                 ↓
+         Structured Context
+                 ↓
+          LLM（未来可选）
+                 ↓
+         AI 解释 + AI 问答
+```
+
+原则是约 80% 的客观分析由可审计的 Python 规则引擎完成，LLM 只负责解释、总结、问答和有限等级建议。LLM 不得修改规则引擎结果；数据不足或过期时必须明确说明。
+
+关键模块：
+
+- `config/settings.py`：环境变量优先、兼容 Streamlit Secrets 的统一配置入口。
+- `funds/yangjibao_client.py`：养基宝专属隔离边界；当前不发起请求。
+- `funds/fund_adapter.py`：跨平台统一基金模型与数据新鲜度。
+- `funds/fund_analyzer.py`、`funds/portfolio_analyzer.py`：纯 Python 规则分析。
+- `ai/context_builder.py`：把规则结果整理为结构化上下文，并预留分析审计记录。
+- `ai/copilot.py`、`ai/prompts.py`：Provider 无关接口和安全 Prompt；当前为占位模式。
+
+QDII、海外指数与港股基金的数据模型预留了净值日期、盘中估值时间、市场时区与新鲜度。盘中估值不能当作最终确认净值。
+
+## 配置与安全
+
+复制 `.env.example` 或 `.streamlit/secrets.toml.example` 后在本机填写配置；真实文件不得提交。公开部署前请阅读 [SECURITY.md](SECURITY.md)。

@@ -1,6 +1,6 @@
 # StockPulse 公网部署
 
-推荐架构：私有 GitHub 仓库 + Streamlit Community Cloud + Supabase。
+支持公开 GitHub 代码仓库 + Streamlit Community Cloud + Supabase；所有真实凭据和个人持仓必须留在部署平台 Secrets / 私有数据库中。
 
 ## 1. 创建 Supabase 数据表
 
@@ -34,6 +34,15 @@ APP_PASSWORD = "你的网页访问密码"
 SUPABASE_URL = "https://your-project.supabase.co"
 SUPABASE_SECRET_KEY = "sb_secret_..."
 WATCHLIST_RECORD_ID = "primary"
+
+# 以下集成本轮不会发起真实请求；仅在未来启用对应适配器后配置
+LLM_PROVIDER = ""
+LLM_API_KEY = ""
+LLM_MODEL = ""
+YANGJIBAO_TOKEN = ""
+YANGJIBAO_ACCOUNT_ID = ""
 ```
 
 5. 点击 Deploy。后续推送 GitHub 后，网页会自动更新。
+
+页面和日志只能显示配置状态，不能输出任何 Secret 内容。若凭据曾进入 Git 历史，请立即撤销并重新生成；仅删除当前文件不能消除泄漏风险。

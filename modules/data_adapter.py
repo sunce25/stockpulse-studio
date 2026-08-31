@@ -7,6 +7,9 @@ import os
 import re
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import requests
 import pandas as pd
 import numpy as np
@@ -118,7 +121,7 @@ class DataAdapter:
             market = self.detect_market(sym)
         
         tc_code = self.get_tencent_code(sym, market)
-        url = f"http://qt.gtimg.cn/q={tc_code}"
+        url = f"https://qt.gtimg.cn/q={tc_code}"
         
         try:
             r = requests.get(url, headers=self.headers, timeout=4)
@@ -143,7 +146,7 @@ class DataAdapter:
             pe = self._to_float(parts[39]) if len(parts) > 39 else 0.0
             mktcap = self._to_float(parts[45]) if len(parts) > 45 else 0.0
 
-            return {
+            quote = {
                 "symbol": sym,
                 "name": name,
                 "market": market,
@@ -158,10 +161,138 @@ class DataAdapter:
                 "turnover": turnover,
                 "pe": pe,
                 "mktcap": mktcap,
-                "time": parts[30] if len(parts) > 30 else ""
+                "time": parts[30] if len(parts) > 30 else "",
+                "source": "腾讯行情",
+                "session": "常规交易时段",
+                "is_extended_hours": False,
             }
+            return self._apply_us_extended_quote(quote)
         except Exception as e:
             return self._fallback_quote(sym, market)
+
+    @staticmethod
+    def _us_session_label(timestamp: int, timezone_name: str = "America/New_York") -> str:
+        """Classify a US quote timestamp as pre-market, regular, or after-hours."""
+        try:
+            local_time = datetime.fromtimestamp(timestamp, timezone.utc).astimezone(
+                ZoneInfo(timezone_name)
+            )
+        except (ValueError, OSError, KeyError):
+            return "最近可用行情"
+        minutes = local_time.hour * 60 + local_time.minute
+        if 4 * 60 <= minutes < 9 * 60 + 30:
+            return "盘前"
+        if 9 * 60 + 30 <= minutes < 16 * 60:
+            return "常规交易时段"
+        if 16 * 60 <= minutes < 20 * 60:
+            return "盘后"
+        return "最近可用行情"
+
+    def _get_us_extended_quote(self, symbol: str, prev_close: float = 0.0) -> dict | None:
+        """Fetch the latest US minute quote, including pre/post-market sessions."""
+        cache_key = f"us_extended:{symbol.upper()}"
+        cached = self.cache.get(cache_key)
+        if cached and time.time() - cached[0] < self.cache_ttl:
+            return dict(cached[1])
+
+        url = (
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol.upper()}"
+            "?interval=1m&range=1d&includePrePost=true"
+        )
+        try:
+            response = requests.get(url, headers=self.headers, timeout=4)
+            response.raise_for_status()
+            result = response.json().get("chart", {}).get("result", [None])[0]
+            if not result:
+                return None
+            timestamps = result.get("timestamp") or []
+            closes = (
+                result.get("indicators", {}).get("quote", [{}])[0].get("close") or []
+            )
+            latest = next(
+                (
+                    (int(timestamp), float(price))
+                    for timestamp, price in reversed(list(zip(timestamps, closes)))
+                    if price is not None and float(price) > 0
+                ),
+                None,
+            )
+            if latest is None:
+                return None
+            timestamp, price = latest
+            meta = result.get("meta", {})
+            timezone_name = str(meta.get("exchangeTimezoneName") or "America/New_York")
+            base_close = float(
+                prev_close
+                or meta.get("chartPreviousClose")
+                or meta.get("previousClose")
+                or 0.0
+            )
+            change = price - base_close if base_close > 0 else 0.0
+            session = self._us_session_label(timestamp, timezone_name)
+            local_time = datetime.fromtimestamp(timestamp, timezone.utc).astimezone(
+                ZoneInfo(timezone_name)
+            )
+            extended = {
+                "price": price,
+                "change": change,
+                "pct_chg": change / base_close * 100 if base_close > 0 else 0.0,
+                "time": local_time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                "source": "Yahoo Finance 分钟行情",
+                "session": session,
+                "is_extended_hours": session in {"盘前", "盘后"},
+                "timestamp": timestamp,
+            }
+            self.cache[cache_key] = (time.time(), dict(extended))
+            return extended
+        except (requests.RequestException, ValueError, TypeError, AttributeError, IndexError):
+            return None
+
+    def _apply_us_extended_quote(self, quote: dict) -> dict:
+        """Overlay a newer US minute quote while preserving regular-session fields."""
+        if quote.get("market") != "美股":
+            return quote
+        extended = self._get_us_extended_quote(
+            str(quote.get("symbol", "")), float(quote.get("prev_close", 0.0) or 0.0)
+        )
+        regular_timestamp = 0.0
+        try:
+            regular_timestamp = datetime.strptime(
+                str(quote.get("time", "")), "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=ZoneInfo("America/New_York")).timestamp()
+        except ValueError:
+            pass
+        if extended and float(extended.get("timestamp", 0.0) or 0.0) >= regular_timestamp:
+            quote.update(extended)
+        return quote
+
+    def clear_quote_cache(self) -> None:
+        """Clear short-lived quote caches without touching the hourly FX cache."""
+        for key in list(self.cache):
+            if str(key).startswith("us_extended:"):
+                self.cache.pop(key, None)
+
+    def _apply_us_extended_quotes(self, quotes: list[dict]) -> list[dict]:
+        """Update US quotes concurrently so one slow symbol does not block the page."""
+        candidates = [
+            quote
+            for quote in quotes
+            if quote.get("market") == "美股"
+            and not str(quote.get("source", "")).startswith("Yahoo Finance")
+        ]
+        if not candidates:
+            return quotes
+        with ThreadPoolExecutor(max_workers=min(6, len(candidates))) as executor:
+            futures = {
+                executor.submit(self._apply_us_extended_quote, quote): quote
+                for quote in candidates
+            }
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception:
+                    continue
+        return quotes
 
     def _fallback_quote(self, symbol: str, market: str) -> dict:
         """兜底行情对象"""
@@ -172,7 +303,7 @@ class DataAdapter:
                 found_name = item["name"]
                 market = item["market"]
                 break
-        return {
+        quote = {
             "symbol": symbol,
             "name": found_name,
             "market": market,
@@ -187,8 +318,12 @@ class DataAdapter:
             "turnover": 0.0,
             "pe": 0.0,
             "mktcap": 0.0,
-            "time": ""
+            "time": "",
+            "source": "行情暂不可用",
+            "session": "未知",
+            "is_extended_hours": False,
         }
+        return self._apply_us_extended_quote(quote)
 
     def get_batch_quotes(self, items: list) -> list:
         """批量获取实时行情列表 (items 为 [{'symbol': 'NVDA', 'market': '美股'}, ...])"""
@@ -204,7 +339,7 @@ class DataAdapter:
             tc_codes.append(tc)
             item_map[tc.lower()] = it
 
-        url = f"http://qt.gtimg.cn/q={','.join(tc_codes)}"
+        url = f"https://qt.gtimg.cn/q={','.join(tc_codes)}"
         results_by_code = {}
         try:
             r = requests.get(url, headers=self.headers, timeout=5)
@@ -239,7 +374,11 @@ class DataAdapter:
                         "change": change,
                         "pct_chg": pct_chg,
                         "volume": volume,
-                        "extra": orig_item
+                        "extra": orig_item,
+                        "time": parts[30] if len(parts) > 30 else "",
+                        "source": "腾讯行情",
+                        "session": "常规交易时段",
+                        "is_extended_hours": False,
                     }
         except (requests.RequestException, UnicodeError, ValueError, TypeError):
             # Missing or malformed entries are filled below in the original order.
@@ -252,7 +391,7 @@ class DataAdapter:
                 quote = self.get_realtime_quote(item["symbol"], item.get("market", "auto"))
                 quote["extra"] = item
             results.append(quote)
-        return results
+        return self._apply_us_extended_quotes(results)
 
     def get_usd_cny_rate(self) -> float:
         """Return a cached USD/CNY rate with Tencent and public-API fallbacks."""

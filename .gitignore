@@ -1,9 +1,16 @@
 __pycache__/
+**/__pycache__/
 *.py[cod]
 .pytest_cache/
 .runtime/
 .streamlit/secrets.toml
 data/watchlist.json
 .env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.json
+secrets.json
 .venv/
 venv/

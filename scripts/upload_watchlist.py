@@ -3,7 +3,6 @@
 
 import argparse
 import json
-import os
 import sys
 import tomllib
 from pathlib import Path
@@ -12,6 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from config.settings import get_setting  # noqa: E402
 from modules.cloud_storage import SupabaseJsonStore  # noqa: E402
 
 
@@ -21,10 +21,6 @@ def load_local_secrets() -> dict:
         return {}
     with secrets_path.open("rb") as secrets_file:
         return tomllib.load(secrets_file)
-
-
-def get_setting(name: str, secrets: dict, default: str = "") -> str:
-    return str(os.getenv(name) or secrets.get(name) or default).strip()
 
 
 def main() -> int:
@@ -38,9 +34,11 @@ def main() -> int:
     args = parser.parse_args()
 
     secrets = load_local_secrets()
-    project_url = get_setting("SUPABASE_URL", secrets)
-    secret_key = get_setting("SUPABASE_SECRET_KEY", secrets)
-    record_id = get_setting("WATCHLIST_RECORD_ID", secrets, "primary")
+    project_url = get_setting("SUPABASE_URL", secrets.get("SUPABASE_URL", ""))
+    secret_key = get_setting("SUPABASE_SECRET_KEY", secrets.get("SUPABASE_SECRET_KEY", ""))
+    record_id = get_setting(
+        "WATCHLIST_RECORD_ID", secrets.get("WATCHLIST_RECORD_ID", "primary")
+    )
     if not project_url or not secret_key:
         raise SystemExit("Missing SUPABASE_URL or SUPABASE_SECRET_KEY")
 

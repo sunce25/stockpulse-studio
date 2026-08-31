@@ -8,7 +8,6 @@ import pandas as pd
 import numpy as np
 import datetime
 import hmac
-import os
 import plotly.graph_objects as go
 
 try:
@@ -23,6 +22,10 @@ from modules.chart_builder import create_stock_chart
 from modules.cloud_storage import create_watchlist_manager
 from modules.screener import StockScreener
 from modules.analyzer import TechnicalAnalyzer
+from modules.watchlist import has_active_position
+from config.settings import get_setting
+from funds.page import render_funds_page
+from ai.page import render_ai_copilot_page
 
 # 页面基础配置
 st.set_page_config(
@@ -117,21 +120,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def get_runtime_setting(name: str, default: str = "") -> str:
-    """Read deployment secrets without requiring a local secrets file."""
-    environment_value = os.getenv(name)
-    if environment_value:
-        return str(environment_value).strip()
-    try:
-        secret_value = st.secrets.get(name, default)
-    except Exception:
-        secret_value = default
-    return str(secret_value or default).strip()
-
-
 def require_app_password() -> None:
     """Protect portfolio data when APP_PASSWORD is configured in the cloud."""
-    expected_password = get_runtime_setting("APP_PASSWORD")
+    expected_password = get_setting("APP_PASSWORD")
     if not expected_password or st.session_state.get("app_access_granted", False):
         return
 
@@ -152,7 +143,7 @@ require_app_password()
 
 
 # 初始化单例服务
-SERVICE_CACHE_VERSION = "2026-08-30-fx-v3"
+SERVICE_CACHE_VERSION = "2026-08-31-live-quotes-v4"
 
 
 @st.cache_resource
@@ -166,9 +157,9 @@ def get_services(cache_version: str):
     return adapter, screener, analyzer
 
 adapter, screener, analyzer = get_services(SERVICE_CACHE_VERSION)
-supabase_url = get_runtime_setting("SUPABASE_URL")
-supabase_secret_key = get_runtime_setting("SUPABASE_SECRET_KEY")
-watchlist_record_id = get_runtime_setting("WATCHLIST_RECORD_ID", "primary")
+supabase_url = get_setting("SUPABASE_URL")
+supabase_secret_key = get_setting("SUPABASE_SECRET_KEY")
+watchlist_record_id = get_setting("WATCHLIST_RECORD_ID", "primary")
 cloud_config_incomplete = bool(supabase_url) != bool(supabase_secret_key)
 watchlist_mgr = create_watchlist_manager(
     supabase_url=supabase_url,
@@ -329,7 +320,9 @@ with st.sidebar:
             "📈 个股深度走势",
             "🔍 多维策略选股",
             "⭐ 自选股与组合",
+            "💰 我的基金",
             "🤖 智能形态诊断",
+            "🧠 AI 投资助手",
             "ℹ️ 帮助与说明"
         ],
         index=0
@@ -797,6 +790,12 @@ elif nav_option == "⭐ 自选股与组合":
         rate_source = getattr(adapter, "usd_cny_rate_source", "内置参考（2026-08-30）")
         st.caption(f"汇率来源：{rate_source}；1 USD ≈ {automatic_usd_cny_rate:.6f} CNY")
 
+    if st.button("🔄 立即刷新行情", key="refresh_portfolio_quotes"):
+        clear_quote_cache = getattr(adapter, "clear_quote_cache", None)
+        if callable(clear_quote_cache):
+            clear_quote_cache()
+        st.toast("正在重新获取最新行情。", icon="🔄")
+
     with st.expander("📁 自定义分组管理", expanded=False):
         create_group_col, rename_group_col = st.columns(2)
         with create_group_col:
@@ -940,6 +939,7 @@ elif nav_option == "⭐ 自选股与组合":
     total_val = 0.0
     total_cost = 0.0
     total_day_gain = 0.0
+    active_position_count = sum(has_active_position(item) for item in items)
 
     if items:
         quotes = adapter.get_batch_quotes(items)
@@ -966,8 +966,12 @@ elif nav_option == "⭐ 自选股与组合":
                 "市场": item_market,
                 "原币": "USD" if item_market == "美股" else "CNY",
                 "分组": it.get("group", "默认"),
+                "状态": "持仓" if has_active_position(it) else "自选观察",
                 "现价": curr_p,
                 "今日涨跌": f"{pct_chg:+.2f}%",
+                "行情时段": q.get("session", "未知"),
+                "行情时间": q.get("time", ""),
+                "行情源": q.get("source", "未知"),
                 "持仓成本": cost_p,
                 "持仓数量": shares,
                 f"持仓市值({display_currency_code})": round(mkt_val, 2),
@@ -1006,12 +1010,13 @@ elif nav_option == "⭐ 自选股与组合":
     with p_col4:
         st.markdown(f"""
         <div class='metric-card'>
-            <div class='metric-label'>当前显示标的数</div>
-            <div class='metric-value' style='color:#3b82f6;'>{len(items)} 只</div>
+            <div class='metric-label'>实际持仓 / 当前自选</div>
+            <div class='metric-value' style='color:#3b82f6;'>{active_position_count} / {len(items)} 只</div>
         </div>
         """, unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
+    st.caption("美股现价优先采用最新分钟行情，包含盘前/盘后；行情时间与来源可在表格中核对。")
 
     # 自选股列表表格
     if enriched_items:
@@ -1251,7 +1256,14 @@ elif nav_option == "⭐ 自选股与组合":
 
 
 # -------------------------------------------------------------
-# 页面 4：🤖 智能形态诊断
+# 页面 4：💰 我的基金（示例数据骨架）
+# -------------------------------------------------------------
+elif nav_option == "💰 我的基金":
+    render_funds_page()
+
+
+# -------------------------------------------------------------
+# 页面 5：🤖 智能形态诊断（Python / Quant 规则引擎）
 # -------------------------------------------------------------
 elif nav_option == "🤖 智能形态诊断":
     st.markdown("<div class='main-title'>🤖 智能形态诊断与量化技术简报</div>", unsafe_allow_html=True)
@@ -1341,7 +1353,14 @@ elif nav_option == "🤖 智能形态诊断":
 
 
 # -------------------------------------------------------------
-# 页面 5：ℹ️ 帮助与说明
+# 页面 6：🧠 AI 投资助手（LLM 占位接口）
+# -------------------------------------------------------------
+elif nav_option == "🧠 AI 投资助手":
+    render_ai_copilot_page()
+
+
+# -------------------------------------------------------------
+# 页面 7：ℹ️ 帮助与说明
 # -------------------------------------------------------------
 elif nav_option == "ℹ️ 帮助与说明":
     st.markdown("<div class='main-title'>ℹ️ 系统架构说明与使用指南</div>", unsafe_allow_html=True)

@@ -9,6 +9,15 @@ import copy
 import tempfile
 from typing import List, Dict
 
+
+def has_active_position(item: dict) -> bool:
+    """Return True only when a watchlist item has a positive held quantity."""
+    try:
+        return float(item.get("shares", 0.0) or 0.0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 DEFAULT_WATCHLIST_DATA = {
     "groups": ["全部", "美股科技", "A股龙头", "高股息防御", "核心ETF"],
     "items": [
