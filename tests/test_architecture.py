@@ -15,6 +15,11 @@ from funds.fund_adapter import (
     normalize_fund_holding,
 )
 from funds.fund_analyzer import FundAnalyzer
+from funds.holding_history import (
+    append_sync_history,
+    build_sync_record,
+    sanitize_sync_record,
+)
 from funds.portfolio_analyzer import PortfolioAnalyzer
 from funds.snapshot_store import FundSnapshotError, SupabaseFundSnapshotStore
 from funds.yangjibao_client import YangJiBaoClient, YangJiBaoError
@@ -31,6 +36,57 @@ class SettingsTests(unittest.TestCase):
 
 
 class FundArchitectureTests(unittest.TestCase):
+    def test_sync_history_distinguishes_investment_from_valuation(self):
+        previous = [
+            {
+                **get_demo_holdings()[0],
+                "fund_code": "A",
+                "fund_name": "定投基金",
+                "shares": 100.0,
+                "cost_amount": 100.0,
+                "market_value": 110.0,
+            },
+            {
+                **get_demo_holdings()[1],
+                "fund_code": "B",
+                "fund_name": "估值基金",
+                "shares": 100.0,
+                "cost_amount": 100.0,
+                "market_value": 110.0,
+            },
+        ]
+        current = copy.deepcopy(previous)
+        current[0].update(shares=110.0, cost_amount=110.0, market_value=121.0)
+        current[1]["market_value"] = 112.0
+
+        record = build_sync_record(previous, current, "2026-09-01T10:00:00+00:00")
+
+        self.assertEqual(record["changed_fund_count"], 2)
+        self.assertEqual(record["investment_change_count"], 1)
+        self.assertEqual(record["changes"][0]["change_type"], "份额增加")
+        self.assertEqual(record["changes"][1]["change_type"], "估值变化")
+        self.assertEqual(record["cost_change"], 10.0)
+
+    def test_sync_history_is_bounded_and_newest_first(self):
+        history = []
+        for index in range(5):
+            history = append_sync_history(
+                history, {"timestamp": str(index), "status": "success"}, limit=3
+            )
+        self.assertEqual([item["timestamp"] for item in history], ["4", "3", "2"])
+
+    def test_sync_history_restore_uses_field_whitelist(self):
+        restored = sanitize_sync_record(
+            {
+                "timestamp": "2026-09-01T10:00:00+00:00",
+                "status": "success",
+                "token": "must-not-survive",
+                "changes": [{"fund_code": "A", "cookie": "must-not-survive"}],
+            }
+        )
+        self.assertNotIn("token", restored)
+        self.assertNotIn("cookie", restored["changes"][0])
+
     def test_yangjibao_authorization_is_encrypted_at_rest(self):
         class FakeResponse:
             def __init__(self, payload=None):
@@ -109,6 +165,9 @@ class FundArchitectureTests(unittest.TestCase):
 
         self.assertEqual(len(restored["holdings"]), 3)
         self.assertEqual(restored["updated_at"], "2026-09-01T10:00:00+00:00")
+        self.assertEqual(restored["schema_version"], 2)
+        self.assertEqual(len(restored["history"]), 1)
+        self.assertEqual(restored["history"][0]["status"], "success")
         persisted_text = str(session.rows["primary-funds"]).lower()
         self.assertNotIn("token", persisted_text)
         self.assertNotIn("cookie", persisted_text)

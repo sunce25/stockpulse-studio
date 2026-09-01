@@ -26,7 +26,8 @@
 
 5. **💰 我的基金（架构骨架）**
    - 使用统一基金持仓模型展示组合资产、收益、仓位、集中度和风险评分。
-   - 默认展示 Demo Data；完成实验性养基宝扫码后，可选择账户并只读同步真实基金持仓。配置 Supabase 后会保存标准化快照和加密只读授权，重新打开页面时自动恢复；基金页保持打开时每 5 分钟自动同步，也可手动立即同步，接口异常时回退到最后一次快照。
+   - 默认展示 Demo Data；完成实验性养基宝扫码后，可选择账户并只读同步真实基金持仓。配置 Supabase 后会保存标准化快照、最近 90 次同步审计摘要和加密只读授权，重新打开页面时自动恢复；基金页保持打开时每 5 分钟自动同步，也可手动立即同步，接口异常时回退到最后一次快照。
+   - 同步审计会区分份额/成本变化（例如每日定投）与单纯净值/估值变化，并逐只展示净值日期、估值时间和数据新鲜度。
 
 6. **🧠 AI 投资助手（占位模式）**
    - 已建立 Provider 无关的 Copilot 接口、Prompt 管理与 Structured Context。
@@ -74,6 +75,7 @@ python -m streamlit run app.py
 - `funds/yangjibao_client.py`：养基宝专属隔离边界；仅允许 HTTPS 下的扫码、账户发现和只读持仓同步。
 - `funds/auth_store.py`：使用服务端派生密钥加密保存最小化只读授权，数据库不出现明文 Token。
 - `funds/snapshot_store.py`：在私有 Supabase 中保存标准化基金快照，刷新或接口故障时恢复。
+- `funds/holding_history.py`：生成不含凭据和账户 ID 的同步差异摘要，识别定投份额/成本变化。
 - `funds/fund_adapter.py`：跨平台统一基金模型与数据新鲜度。
 - `funds/fund_analyzer.py`、`funds/portfolio_analyzer.py`：纯 Python 规则分析。
 - `ai/context_builder.py`：把规则结果整理为结构化上下文，并预留分析审计记录。

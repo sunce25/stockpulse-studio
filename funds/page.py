@@ -12,6 +12,7 @@ from config.settings import get_setting, is_configured as setting_is_configured
 from funds.auth_store import SupabaseYangJiBaoAuthStore, YangJiBaoAuthStoreError
 from funds.fund_adapter import get_demo_holdings
 from funds.fund_analyzer import FundAnalyzer
+from funds.holding_history import append_sync_history, build_sync_record
 from funds.portfolio_analyzer import PortfolioAnalyzer
 from funds.snapshot_store import FundSnapshotError, SupabaseFundSnapshotStore
 from funds.yangjibao_client import YangJiBaoClient, YangJiBaoError
@@ -122,11 +123,38 @@ def _format_sync_time(updated_at: str) -> str:
         return str(updated_at or "未知")
 
 
+def _freshness_label(item: dict) -> str:
+    freshness = str(item.get("data_freshness") or "unknown")
+    labels = {
+        "fresh": "正常",
+        "stale": "已过期",
+        "unknown": "时间未知",
+        "invalid_future_time": "时间异常",
+    }
+    label = labels.get(freshness, "待确认")
+    if item.get("is_qdii") and label == "正常":
+        return "QDII延迟范围内"
+    return label
+
+
+def _sync_summary(record: dict | None) -> str:
+    if not record:
+        return "暂无同步差异记录。"
+    investment_count = int(record.get("investment_change_count") or 0)
+    changed_count = int(record.get("changed_fund_count") or 0)
+    if not changed_count:
+        return "本次同步未发现持仓或估值变化。"
+    if investment_count:
+        return f"本次发现 {changed_count} 只基金变化，其中 {investment_count} 只涉及份额或成本。"
+    return f"本次发现 {changed_count} 只基金变化，均为净值或估值变化。"
+
+
 def _synchronize_holdings(
     client: YangJiBaoClient,
     account_id: str,
     snapshot_store: SupabaseFundSnapshotStore | None,
 ) -> list[dict]:
+    previous_holdings = st.session_state.get("_yjb_holdings", [])
     holdings = client.get_holdings(account_id)
     if not holdings:
         raise YangJiBaoError("该账户没有返回有效基金持仓，请检查养基宝账户。")
@@ -137,11 +165,16 @@ def _synchronize_holdings(
     st.session_state["_yjb_holdings_updated_at"] = refreshed_at
     st.session_state.pop("_yjb_holdings_restored", None)
     st.session_state["_yjb_auto_synced"] = True
+    audit_record = build_sync_record(previous_holdings, holdings, refreshed_at)
     if snapshot_store is not None:
         try:
-            snapshot_store.save(holdings, refreshed_at)
+            audit_record = snapshot_store.save(holdings, refreshed_at)
         except FundSnapshotError as exc:
             st.session_state["_yjb_snapshot_error"] = str(exc)
+    st.session_state["_yjb_sync_history"] = append_sync_history(
+        st.session_state.get("_yjb_sync_history", []), audit_record
+    )
+    st.session_state["_yjb_latest_sync_record"] = audit_record
     return holdings
 
 
@@ -159,6 +192,9 @@ def _restore_fund_snapshot(store: SupabaseFundSnapshotStore | None) -> None:
     if snapshot and snapshot.get("holdings"):
         st.session_state["_yjb_holdings"] = snapshot["holdings"]
         st.session_state["_yjb_holdings_updated_at"] = snapshot.get("updated_at", "")
+        st.session_state["_yjb_sync_history"] = snapshot.get("history", [])
+        if snapshot.get("history"):
+            st.session_state["_yjb_latest_sync_record"] = snapshot["history"][0]
         st.session_state["_yjb_holdings_restored"] = True
 
 
@@ -282,6 +318,12 @@ def render_funds_page() -> None:
                     st.rerun()
                 except (YangJiBaoError, FundSnapshotError) as exc:
                     st.error(str(exc))
+            latest_record = st.session_state.get("_yjb_latest_sync_record")
+            if latest_record:
+                if int(latest_record.get("investment_change_count") or 0):
+                    st.info("📌 " + _sync_summary(latest_record))
+                else:
+                    st.caption(_sync_summary(latest_record))
         cols = st.columns(6)
         cols[0].metric("基金总资产", _currency(portfolio["total_assets"]))
         cols[1].metric(
@@ -307,7 +349,9 @@ def render_funds_page() -> None:
                     "仓位": item["portfolio_weight"] * 100,
                     "收益": item["holding_return_pct"],
                     "风险状态": result["risk_status"],
-                    "数据状态": "已过期" if item["stale_data"] else "正常",
+                    "确认净值日期": item.get("nav_date") or "未知",
+                    "估值时间": _format_sync_time(item.get("estimated_nav_time") or ""),
+                    "数据状态": _freshness_label(item),
                 }
             )
         st.dataframe(
@@ -332,6 +376,16 @@ def render_funds_page() -> None:
         )
         selected = next(item for item in holdings if item["fund_code"] == selected_code)
         result = analyses[selected_code]
+        freshness_cols = st.columns(4)
+        freshness_cols[0].metric("数据状态", _freshness_label(selected))
+        freshness_cols[1].metric("确认净值日期", selected.get("nav_date") or "未知")
+        freshness_cols[2].metric(
+            "盘中估值",
+            "暂无" if selected.get("estimated_nav") is None else f"{selected['estimated_nav']:.4f}",
+        )
+        freshness_cols[3].metric(
+            "估值时间", _format_sync_time(selected.get("estimated_nav_time") or "")
+        )
         left, right = st.columns(2)
         with left:
             st.markdown("#### 标准化持仓")
@@ -340,7 +394,7 @@ def render_funds_page() -> None:
             st.markdown("#### 规则分析")
             st.json(result)
         if selected["is_qdii"]:
-            st.info("该示例为 QDII：估算净值不等于最终确认净值，并可能受时区、汇率和净值延迟影响。")
+            st.info("该基金为 QDII：估算净值不等于最终确认净值，并可能受时区、汇率和净值延迟影响。")
 
     with source_tab:
         snapshot_error = st.session_state.pop("_yjb_snapshot_error", "")
@@ -358,6 +412,52 @@ def render_funds_page() -> None:
             st.caption("已启用私有基金快照：仅保存标准化持仓，不保存养基宝 Token、Cookie 或账户 ID。")
         if auth_store is not None:
             st.caption("授权将先加密再保存；重新打开网页可自动恢复，明文 Token 不会写入数据库。")
+        history = st.session_state.get("_yjb_sync_history", [])
+        if history:
+            st.markdown("#### 最近同步记录")
+            history_rows = [
+                {
+                    "同步时间": _format_sync_time(item.get("timestamp", "")),
+                    "状态": "成功" if item.get("status") == "success" else "失败",
+                    "基金数": item.get("fund_count", 0),
+                    "总资产": item.get("total_assets", 0.0),
+                    "资产变化": item.get("asset_change", 0.0),
+                    "成本变化": item.get("cost_change", 0.0),
+                    "变化基金": item.get("changed_fund_count", 0),
+                    "定投/份额变化": item.get("investment_change_count", 0),
+                }
+                for item in history[:20]
+            ]
+            st.dataframe(
+                pd.DataFrame(history_rows),
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "总资产": st.column_config.NumberColumn(format="¥ %.2f"),
+                    "资产变化": st.column_config.NumberColumn(format="%+.2f"),
+                    "成本变化": st.column_config.NumberColumn(format="%+.2f"),
+                },
+            )
+            latest_changes = history[0].get("changes", [])
+            if latest_changes:
+                with st.expander("查看最近一次基金变化明细"):
+                    st.dataframe(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "基金": item.get("fund_name", ""),
+                                    "代码": item.get("fund_code", ""),
+                                    "变化类型": item.get("change_type", ""),
+                                    "份额变化": item.get("shares_delta", 0.0),
+                                    "成本变化": item.get("cost_amount_delta", 0.0),
+                                    "市值变化": item.get("market_value_delta", 0.0),
+                                }
+                                for item in latest_changes
+                            ]
+                        ),
+                        hide_index=True,
+                        width="stretch",
+                    )
         session_token = st.session_state.get("_yjb_session_token")
         client = YangJiBaoClient(token=session_token) if session_token else YangJiBaoClient()
         config_status = client.configuration_status()

@@ -13,6 +13,11 @@ from typing import Any
 import requests
 
 from funds.fund_adapter import FUND_HOLDING_FIELDS, normalize_fund_holdings
+from funds.holding_history import (
+    append_sync_history,
+    build_sync_record,
+    sanitize_sync_history,
+)
 
 
 class FundSnapshotError(RuntimeError):
@@ -33,7 +38,7 @@ def _is_safe_holding(value: Any) -> bool:
 def _is_fund_snapshot(value: Any) -> bool:
     return (
         isinstance(value, dict)
-        and value.get("schema_version") == 1
+        and value.get("schema_version") in {1, 2}
         and value.get("source") == "yangjibao"
         and isinstance(value.get("holdings"), list)
         and all(_is_safe_holding(item) for item in value["holdings"])
@@ -98,21 +103,35 @@ class SupabaseFundSnapshotStore:
         snapshot["holdings"] = normalize_fund_holdings(
             snapshot["holdings"], source="yangjibao"
         )
+        snapshot["history"] = sanitize_sync_history(snapshot.get("history", []))
         return snapshot
 
-    def save(self, holdings: list[dict[str, Any]], updated_at: str = "") -> None:
+    def save(
+        self, holdings: list[dict[str, Any]], updated_at: str = ""
+    ) -> dict[str, Any]:
         if not holdings or not all(_is_safe_holding(item) for item in holdings):
             raise FundSnapshotError("拒绝保存包含敏感字段或格式无效的基金快照。")
         safe_holdings = normalize_fund_holdings(holdings, source="yangjibao")
         if not all(_is_safe_holding(item) for item in safe_holdings):
             raise FundSnapshotError("拒绝保存空白或格式无效的基金快照。")
 
+        previous: dict[str, Any] | None = None
+        try:
+            previous = self.load()
+        except FundSnapshotError:
+            # A successful fresh write may repair a missing/legacy malformed record.
+            previous = None
+        audit_record = build_sync_record(
+            (previous or {}).get("holdings", []), safe_holdings, updated_at
+        )
+        history = append_sync_history((previous or {}).get("history", []), audit_record)
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "source": "yangjibao",
             "updated_at": str(updated_at or "").strip()
             or datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "holdings": copy.deepcopy(safe_holdings),
+            "history": history,
         }
         try:
             response = self.session.post(
@@ -129,3 +148,4 @@ class SupabaseFundSnapshotStore:
             response.raise_for_status()
         except Exception as exc:
             raise FundSnapshotError("保存基金云端快照失败，本次数据仍仅在当前会话可用。") from exc
+        return copy.deepcopy(audit_record)
