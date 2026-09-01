@@ -29,9 +29,10 @@
    - 默认展示 Demo Data；完成实验性养基宝扫码后，可选择账户并只读同步真实基金持仓。配置 Supabase 后会保存标准化快照、最近 90 次同步审计摘要和加密只读授权，重新打开页面时自动恢复；基金页保持打开时每 5 分钟自动同步，也可手动立即同步，接口异常时回退到最后一次快照。
    - 同步审计会区分份额/成本变化（例如每日定投）与单纯净值/估值变化，并逐只展示净值日期、估值时间和数据新鲜度。
 
-6. **🧠 AI 投资助手（占位模式）**
-   - 已建立 Provider 无关的 Copilot 接口、Prompt 管理与 Structured Context。
-   - 当前不会调用 OpenAI、Gemini、Claude、DeepSeek 或其他 LLM API。
+6. **🧠 AI 投资助手**
+   - 已建立 Provider 无关的 Copilot 接口、Prompt 管理、Structured Context 与 Gemini Provider。
+   - 配置Gemini后，可基于真实标准化基金持仓生成组合解读并回答持仓问题；未配置时安全回退为规则分析。
+   - 每次调用前必须由用户勾选数据发送授权。AI不接触养基宝Token、Cookie、账户ID或Supabase Secret，也不会执行交易。
 
 ---
 
@@ -62,7 +63,7 @@ python -m streamlit run app.py
                  ↓
          Structured Context
                  ↓
-          LLM（未来可选）
+       LLM（当前支持Gemini）
                  ↓
          AI 解释 + AI 问答
 ```
@@ -78,13 +79,16 @@ python -m streamlit run app.py
 - `funds/holding_history.py`：生成不含凭据和账户 ID 的同步差异摘要，识别定投份额/成本变化。
 - `funds/fund_adapter.py`：跨平台统一基金模型与数据新鲜度。
 - `funds/fund_analyzer.py`、`funds/portfolio_analyzer.py`：纯 Python 规则分析。
-- `ai/context_builder.py`：把规则结果整理为结构化上下文，并预留分析审计记录。
-- `ai/copilot.py`、`ai/prompts.py`：Provider 无关接口和安全 Prompt；当前为占位模式。
+- `ai/context_builder.py`：把规则结果整理为字段白名单控制的结构化上下文，并预留分析审计记录。
+- `ai/copilot.py`、`ai/prompts.py`：Provider无关接口和安全Prompt。
+- `ai/providers/gemini.py`：服务端Gemini Interactions API适配器；不记录或显示API Key。
 
 QDII、海外指数与港股基金的数据模型预留了净值日期、盘中估值时间、市场时区与新鲜度。盘中估值不能当作最终确认净值。
 
 ## 配置与安全
 
 复制 `.env.example` 或 `.streamlit/secrets.toml.example` 后在本机填写配置；真实文件不得提交。公开部署前请阅读 [SECURITY.md](SECURITY.md)。
+
+Gemini建议配置：`LLM_PROVIDER="gemini"`、`LLM_MODEL="gemini-3.7-flash"`、`GEMINI_API_KEY="..."`。Key只能保存在服务端Secrets中，并应在Google AI Studio限制为Gemini API专用。未勾选页面中的单次数据发送授权时，StockPulse不会调用Gemini。
 
 养基宝连接属于实验功能，并非官方公开开发者 API。只有配置 `APP_PASSWORD`、`YANGJIBAO_SIGNING_SECRET` 且接口为 HTTPS 时页面才允许发起扫码和只读同步。配置 Supabase 后，扫码取得的只读 Token 与账户 ID 会经过认证加密后保存，标准化持仓保存为独立私有快照；两者都不显示、不写日志，数据库中不会出现明文凭据。StockPulse 不调用养基宝的新增、删除或修改接口。

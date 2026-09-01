@@ -19,6 +19,38 @@ ANALYSIS_HISTORY_FIELDS = (
     "ai_explanation",
 )
 
+AI_HOLDING_FIELDS = (
+    "fund_code",
+    "fund_name",
+    "market_value",
+    "cost_amount",
+    "shares",
+    "cost_nav",
+    "latest_nav",
+    "estimated_nav",
+    "holding_return_pct",
+    "holding_profit",
+    "portfolio_weight",
+    "source",
+    "updated_at",
+    "nav_date",
+    "estimated_nav_time",
+    "market_timezone",
+    "is_qdii",
+    "data_freshness",
+    "stale_data",
+    "asset_type",
+    "industry",
+    "theme",
+    "region",
+    "today_profit",
+)
+
+
+def _sanitize_holding_for_ai(item: dict) -> dict:
+    """Apply data minimization before any context can reach an LLM provider."""
+    return {field: item.get(field) for field in AI_HOLDING_FIELDS if field in item}
+
 
 def build_analysis_context(
     *,
@@ -30,7 +62,11 @@ def build_analysis_context(
     user_question: str = "",
 ) -> dict[str, Any]:
     """Assemble facts already computed by deterministic application modules."""
-    normalized_holdings = [dict(item) for item in (holdings or [])]
+    normalized_holdings = [
+        _sanitize_holding_for_ai(item)
+        for item in (holdings or [])
+        if isinstance(item, dict)
+    ]
     sources_stale = any(item.get("stale_data", False) for item in normalized_holdings)
     portfolio = dict(portfolio_summary or {})
     risk = dict(risk_summary or {})

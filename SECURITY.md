@@ -15,6 +15,8 @@ StockPulse Studio 可以公开代码，但密钥、登录凭据和个人投资�
 
 所有敏感配置只能通过环境变量或 Streamlit Secrets 提供。应用只显示“已配置 / 未配置”，不得显示 Key、Token 或 Cookie 内容。
 
+Gemini API Key必须使用服务端环境变量或Streamlit Secrets中的`GEMINI_API_KEY`，不得发送到浏览器、写入Prompt或进入分析历史。建议在Google AI Studio创建Auth Key并限制为Gemini API专用。发送投资组合给Gemini前，页面必须获得用户当次明确授权；Context Builder只允许标准化基金分析字段，拒绝向LLM传递凭据和账户标识。
+
 养基宝实验连接必须使用 HTTPS，并要求应用已配置访问密码。扫码 Token 不得通过调试日志、URL 参数、浏览器存储或第三方二维码生成服务传递。启用 Supabase 时，最小化只读授权使用 `cryptography` 的 Fernet 认证加密后保存，密钥由服务端 Supabase Secret 与应用密码派生；数据库不得保存明文 Token、Cookie、账户 ID 或养基宝原始响应。标准化基金快照与加密授权使用独立记录，用户可在页面主动清除已保存授权。
 
 ## 如果密钥曾进入 Git 历史

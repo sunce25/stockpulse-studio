@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from ai.context_builder import ANALYSIS_HISTORY_FIELDS, build_analysis_context
-from ai.copilot import AICopilot, NOT_CONFIGURED_MESSAGE
+from ai.copilot import AICopilot, EMPTY_QUESTION_MESSAGE, NOT_CONFIGURED_MESSAGE
+from ai.providers.gemini import GEMINI_INTERACTIONS_URL, GeminiProvider
 from config.settings import get_setting
 from funds.auth_store import SupabaseYangJiBaoAuthStore
 from funds.fund_adapter import (
@@ -36,6 +37,73 @@ class SettingsTests(unittest.TestCase):
 
 
 class FundArchitectureTests(unittest.TestCase):
+    def test_gemini_provider_uses_header_and_extracts_text(self):
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "status": "completed",
+                    "steps": [
+                        {
+                            "type": "model_output",
+                            "content": [{"type": "text", "text": "组合风险可控。"}],
+                        }
+                    ],
+                }
+
+        class FakeSession:
+            def post(self, url, headers, json, timeout, allow_redirects):
+                self.url = url
+                self.headers = headers
+                self.body = copy.deepcopy(json)
+                self.timeout = timeout
+                self.allow_redirects = allow_redirects
+                return FakeResponse()
+
+        session = FakeSession()
+        provider = GeminiProvider(
+            "private-gemini-key", "gemini-3.7-flash", session=session
+        )
+        answer = provider.generate(
+            system_prompt="只解释数据",
+            task_prompt="分析组合",
+            context={"portfolio_summary": {"risk_score": 20}},
+        )
+
+        self.assertEqual(answer, "组合风险可控。")
+        self.assertEqual(session.url, GEMINI_INTERACTIONS_URL)
+        self.assertEqual(session.headers["x-goog-api-key"], "private-gemini-key")
+        self.assertNotIn("private-gemini-key", str(session.body))
+        self.assertFalse(session.body["store"])
+        self.assertFalse(session.allow_redirects)
+
+    def test_copilot_uses_injected_provider_without_exposing_key(self):
+        class FakeProvider:
+            def generate(self, **kwargs):
+                self.request = kwargs
+                return "仅基于上下文的回答"
+
+        provider = FakeProvider()
+        copilot = AICopilot(
+            provider="gemini",
+            api_key="private-key",
+            model="gemini-3.7-flash",
+            provider_client=provider,
+        )
+        answer = copilot.answer_question(
+            {"portfolio_summary": {"risk_score": 20}}, "最大风险是什么？"
+        )
+
+        self.assertEqual(answer, "仅基于上下文的回答")
+        self.assertEqual(provider.request["context"]["user_question"], "最大风险是什么？")
+        self.assertNotIn("private-key", str(provider.request))
+        self.assertNotIn("api_key", copilot.configuration_status())
+        self.assertEqual(copilot.answer_question({}, ""), EMPTY_QUESTION_MESSAGE)
+
     def test_sync_history_distinguishes_investment_from_valuation(self):
         previous = [
             {
@@ -211,6 +279,7 @@ class FundArchitectureTests(unittest.TestCase):
 
     def test_rule_engine_and_context_keep_freshness(self):
         holding = get_demo_holdings()[0]
+        holding["access_token"] = "must-not-reach-ai"
         analysis = FundAnalyzer().analyze(holding, nav_history=range(1, 31))
         portfolio = PortfolioAnalyzer().analyze([holding])
         context = build_analysis_context(
@@ -220,6 +289,8 @@ class FundArchitectureTests(unittest.TestCase):
         )
         self.assertEqual(analysis["rule_version"], "fund-rules-v1")
         self.assertIn("stale_data", context)
+        self.assertNotIn("access_token", context["holdings"][0])
+        self.assertNotIn("must-not-reach-ai", str(context))
         self.assertTrue(set(ANALYSIS_HISTORY_FIELDS))
 
     def test_missing_history_does_not_produce_holding_advice(self):
