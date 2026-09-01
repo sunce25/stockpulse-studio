@@ -80,7 +80,6 @@ class GeminiProvider:
             "system_instruction": str(system_prompt).strip(),
             "store": False,
             "generation_config": {
-                "temperature": 0.2,
                 "max_output_tokens": 1400,
             },
         }
@@ -105,8 +104,13 @@ class GeminiProvider:
             raise GeminiProviderError("Gemini 请求超时，请稍后重试。") from exc
         except requests.RequestException as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
-            if status == 401 or status == 403:
+            if status == 401:
                 message = "Gemini 授权失败，请检查 API Key 是否有效且已限制为 Gemini API。"
+            elif status == 403:
+                detail = self._safe_error_detail(getattr(exc, "response", None))
+                message = "Gemini 权限被拒绝。"
+                if detail:
+                    message = f"{message} Google 返回：{detail}"
             elif status == 429:
                 message = "Gemini 当前请求过多或额度不足，请稍后重试。"
             else:
@@ -123,3 +127,27 @@ class GeminiProvider:
         if not text:
             raise GeminiProviderError("Gemini 未返回可显示的文本结果。")
         return text
+
+    def _safe_error_detail(self, response: Any) -> str:
+        """Return a short Google error description with credential redaction."""
+        if response is None:
+            return ""
+        try:
+            payload = response.json()
+        except (TypeError, ValueError):
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            return ""
+        detail = str(error.get("message") or error.get("status") or "").strip()
+        if not detail:
+            return ""
+        detail = detail.replace(self._api_key, "[REDACTED]")
+        detail = re.sub(
+            r"\b(?:AQ\.|AIza)[A-Za-z0-9._-]{15,}\b",
+            "[REDACTED]",
+            detail,
+        )
+        return detail[:300]

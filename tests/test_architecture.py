@@ -79,7 +79,23 @@ class FundArchitectureTests(unittest.TestCase):
         self.assertEqual(session.headers["x-goog-api-key"], "private-gemini-key")
         self.assertNotIn("private-gemini-key", str(session.body))
         self.assertFalse(session.body["store"])
+        self.assertNotIn("temperature", session.body["generation_config"])
         self.assertFalse(session.allow_redirects)
+
+    def test_gemini_error_detail_redacts_auth_keys(self):
+        class FakeErrorResponse:
+            def json(self):
+                return {
+                    "error": {
+                        "message": "Permission denied for AQ.private-auth-key-value-1234567890"
+                    }
+                }
+
+        provider = GeminiProvider("AQ.private-auth-key-value-1234567890")
+        detail = provider._safe_error_detail(FakeErrorResponse())
+
+        self.assertIn("[REDACTED]", detail)
+        self.assertNotIn("private-auth-key", detail)
 
     def test_copilot_uses_injected_provider_without_exposing_key(self):
         class FakeProvider:
