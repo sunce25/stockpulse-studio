@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 
 import pandas as pd
@@ -39,6 +39,9 @@ def _clear_yangjibao_session() -> None:
         "_yjb_accounts",
         "_yjb_holdings",
         "_yjb_holdings_updated_at",
+        "_yjb_active_account_id",
+        "_yjb_active_account_name",
+        "_yjb_active_account_count",
     ):
         st.session_state.pop(key, None)
 
@@ -108,6 +111,40 @@ def _snapshot_is_stale(updated_at: str, max_age_seconds: int = 300) -> bool:
         return True
 
 
+def _format_sync_time(updated_at: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        china_time = parsed.astimezone(timezone(timedelta(hours=8)))
+        return china_time.strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return str(updated_at or "未知")
+
+
+def _synchronize_holdings(
+    client: YangJiBaoClient,
+    account_id: str,
+    snapshot_store: SupabaseFundSnapshotStore | None,
+) -> list[dict]:
+    holdings = client.get_holdings(account_id)
+    if not holdings:
+        raise YangJiBaoError("该账户没有返回有效基金持仓，请检查养基宝账户。")
+    refreshed_at = max(
+        (str(item.get("updated_at") or "") for item in holdings), default=""
+    )
+    st.session_state["_yjb_holdings"] = holdings
+    st.session_state["_yjb_holdings_updated_at"] = refreshed_at
+    st.session_state.pop("_yjb_holdings_restored", None)
+    st.session_state["_yjb_auto_synced"] = True
+    if snapshot_store is not None:
+        try:
+            snapshot_store.save(holdings, refreshed_at)
+        except FundSnapshotError as exc:
+            st.session_state["_yjb_snapshot_error"] = str(exc)
+    return holdings
+
+
 def _restore_fund_snapshot(store: SupabaseFundSnapshotStore | None) -> None:
     if st.session_state.get("_yjb_snapshot_checked"):
         return
@@ -148,6 +185,9 @@ def _restore_yangjibao_authorization(
             "holding_count": credentials["holding_count"],
         }
     ]
+    st.session_state["_yjb_active_account_id"] = credentials["account_id"]
+    st.session_state["_yjb_active_account_name"] = credentials["display_name"]
+    st.session_state["_yjb_active_account_count"] = credentials["holding_count"]
     st.session_state["_yjb_auth_restored"] = True
     updated_at = st.session_state.get("_yjb_holdings_updated_at", "")
     if not _snapshot_is_stale(updated_at):
@@ -155,18 +195,25 @@ def _restore_yangjibao_authorization(
 
     try:
         client = YangJiBaoClient(token=credentials["token"])
-        holdings = client.get_holdings(credentials["account_id"])
-        if not holdings:
-            return
-        refreshed_at = max(
-            (str(item.get("updated_at") or "") for item in holdings), default=""
+        _synchronize_holdings(client, credentials["account_id"], snapshot_store)
+    except (YangJiBaoError, FundSnapshotError) as exc:
+        st.session_state["_yjb_auto_sync_error"] = str(exc)
+
+
+@st.fragment(run_every="5m")
+def _fund_auto_refresh(snapshot_store: SupabaseFundSnapshotStore | None) -> None:
+    """Refresh an open fund page every five minutes without exposing credentials."""
+    token = st.session_state.get("_yjb_session_token")
+    account_id = st.session_state.get("_yjb_active_account_id")
+    updated_at = st.session_state.get("_yjb_holdings_updated_at", "")
+    if not token or not account_id or not _snapshot_is_stale(updated_at):
+        return
+    try:
+        _synchronize_holdings(
+            YangJiBaoClient(token=token), account_id, snapshot_store
         )
-        st.session_state["_yjb_holdings"] = holdings
-        st.session_state["_yjb_holdings_updated_at"] = refreshed_at
-        st.session_state.pop("_yjb_holdings_restored", None)
-        st.session_state["_yjb_auto_synced"] = True
-        if snapshot_store is not None:
-            snapshot_store.save(holdings, refreshed_at)
+        st.session_state["_yjb_sync_notice"] = "已自动同步养基宝最新持仓。"
+        st.rerun()
     except (YangJiBaoError, FundSnapshotError) as exc:
         st.session_state["_yjb_auto_sync_error"] = str(exc)
 
@@ -182,6 +229,7 @@ def render_funds_page() -> None:
     auth_store = _yangjibao_auth_store()
     _restore_fund_snapshot(snapshot_store)
     _restore_yangjibao_authorization(auth_store, snapshot_store)
+    _fund_auto_refresh(snapshot_store)
     session_holdings = st.session_state.get("_yjb_holdings")
     using_real_holdings = isinstance(session_holdings, list) and bool(session_holdings)
     if using_real_holdings:
@@ -189,7 +237,7 @@ def render_funds_page() -> None:
         updated_at = st.session_state.get("_yjb_holdings_updated_at", "")
         st.success(
             "当前展示养基宝只读同步数据。"
-            + (f" 同步时间：{updated_at}" if updated_at else "")
+            + (f" 同步时间：{_format_sync_time(updated_at)}（北京时间）" if updated_at else "")
         )
         if st.session_state.get("_yjb_holdings_restored"):
             st.caption("该数据已从私有 Supabase 快照恢复；刷新网页不会再退回示例数据。")
@@ -206,6 +254,34 @@ def render_funds_page() -> None:
 
     overview_tab, detail_tab, source_tab = st.tabs(["组合概览", "基金详情", "数据源"])
     with overview_tab:
+        sync_notice = st.session_state.pop("_yjb_sync_notice", "")
+        if sync_notice:
+            st.success(sync_notice)
+        active_account_id = st.session_state.get("_yjb_active_account_id")
+        session_token = st.session_state.get("_yjb_session_token")
+        if using_real_holdings:
+            refresh_col, refresh_note_col = st.columns([1, 4])
+            with refresh_col:
+                force_sync = st.button(
+                    "🔄 立即同步",
+                    use_container_width=True,
+                    disabled=not (session_token and active_account_id),
+                    help="立即从养基宝只读拉取最新份额、成本、净值与估值。",
+                )
+            with refresh_note_col:
+                st.caption("页面打开期间每 5 分钟自动同步；每日定投变更也可点击立即同步。")
+            if force_sync:
+                try:
+                    with st.spinner("正在读取养基宝最新持仓…"):
+                        _synchronize_holdings(
+                            YangJiBaoClient(token=session_token),
+                            active_account_id,
+                            snapshot_store,
+                        )
+                    st.session_state["_yjb_sync_notice"] = "已同步养基宝最新持仓。"
+                    st.rerun()
+                except (YangJiBaoError, FundSnapshotError) as exc:
+                    st.error(str(exc))
         cols = st.columns(6)
         cols[0].metric("基金总资产", _currency(portfolio["total_assets"]))
         cols[1].metric(
@@ -413,40 +489,25 @@ def render_funds_page() -> None:
             ):
                 selected_account = accounts[selected_account_index]
                 try:
-                    synchronized = client.get_holdings(
-                        selected_account["account_id"]
+                    synchronized = _synchronize_holdings(
+                        client,
+                        selected_account["account_id"],
+                        snapshot_store,
                     )
-                    if not synchronized:
-                        st.warning("该账户没有返回有效基金持仓，请检查养基宝账户。")
-                    else:
-                        st.session_state["_yjb_holdings"] = synchronized
-                        st.session_state["_yjb_holdings_updated_at"] = max(
-                            (
-                                str(item.get("updated_at") or "")
-                                for item in synchronized
-                            ),
-                            default="",
+                    st.session_state["_yjb_active_account_id"] = selected_account["account_id"]
+                    st.session_state["_yjb_active_account_name"] = selected_account["display_name"]
+                    st.session_state["_yjb_active_account_count"] = selected_account["holding_count"]
+                    if auth_store is not None and session_token:
+                        auth_store.save(
+                            session_token,
+                            selected_account["account_id"],
+                            selected_account["display_name"],
+                            selected_account["holding_count"],
                         )
-                        st.session_state.pop("_yjb_holdings_restored", None)
-                        if snapshot_store is not None:
-                            try:
-                                snapshot_store.save(
-                                    synchronized,
-                                    st.session_state["_yjb_holdings_updated_at"],
-                                )
-                            except FundSnapshotError as exc:
-                                st.warning(str(exc))
-                        if auth_store is not None and session_token:
-                            try:
-                                auth_store.save(
-                                    session_token,
-                                    selected_account["account_id"],
-                                    selected_account["display_name"],
-                                    selected_account["holding_count"],
-                                )
-                                st.session_state["_yjb_auth_restored"] = True
-                            except YangJiBaoAuthStoreError as exc:
-                                st.warning(str(exc))
-                        st.rerun()
-                except YangJiBaoError as exc:
+                        st.session_state["_yjb_auth_restored"] = True
+                    st.session_state["_yjb_sync_notice"] = (
+                        f"已同步 {len(synchronized)} 只基金，并保存最新快照。"
+                    )
+                    st.rerun()
+                except (YangJiBaoError, FundSnapshotError, YangJiBaoAuthStoreError) as exc:
                     st.error(str(exc))

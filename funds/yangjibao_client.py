@@ -216,7 +216,14 @@ class YangJiBaoClient:
         shares = self._number(self._first(raw, "hold_share", "share"))
         cost_nav = self._number(self._first(raw, "hold_cost", "cost_nav"))
         latest_nav = self._number(
-            self._first(raw, "last_net", "latest_nav", "nav", "dwjz")
+            self._first(
+                raw,
+                "last_net",
+                "latest_nav",
+                "nav",
+                "dwjz",
+                default=self._first(nv_info, "dwjz", "latest_nav"),
+            )
         )
         market_value = self._number(self._first(raw, "money", "market_value", "amount"))
         profit_value = self._first(
@@ -224,7 +231,7 @@ class YangJiBaoClient:
         )
         holding_profit = self._number(profit_value)
         cost_amount = self._number(
-            self._first(raw, "cost_money", "cost_amount", "hold_money")
+            self._first(raw, "cost_money", "cost_amount", "hold_money", "hold_sum")
         )
         if not market_value and shares and latest_nav:
             market_value = shares * latest_nav
@@ -235,7 +242,13 @@ class YangJiBaoClient:
                 cost_amount = shares * cost_nav
 
         estimated_nav_value = self._first(
-            nv_info, "gsz", "vgsz", "zsgz", "estimated_nav", default=None
+            nv_info,
+            "gzjz",
+            "zsgz",
+            "gsz",
+            "vgsz",
+            "estimated_nav",
+            default=None,
         )
         estimated_nav = (
             None
@@ -282,6 +295,24 @@ class YangJiBaoClient:
             "profit_rate",
             default=None,
         )
+        estimated_rate = self._number(
+            self._first(
+                nv_info,
+                "gszzl",
+                "zsgzzl",
+                "vgszzl",
+                "jzzzl",
+                "rzzl",
+            )
+        )
+        today_profit_value = self._first(
+            raw, "today_earn", "today_income", "day_earn", default=None
+        )
+        today_profit = (
+            self._number(today_profit_value)
+            if today_profit_value not in (None, "")
+            else market_value * estimated_rate / 100
+        )
         return {
             "fund_code": code,
             "fund_name": str(
@@ -301,9 +332,7 @@ class YangJiBaoClient:
             "holding_profit": (
                 None if profit_value in (None, "") else holding_profit
             ),
-            "today_profit": self._number(
-                self._first(raw, "today_earn", "today_income", "day_earn")
-            ),
+            "today_profit": today_profit,
             "source": "yangjibao",
             "updated_at": fetched_at,
             "nav_date": nav_date,
@@ -312,7 +341,7 @@ class YangJiBaoClient:
             "is_qdii": is_qdii,
             "data_freshness": "unknown" if not nav_date else "",
             "stale_data": True if not nav_date else None,
-            "freshness_reference": nav_date,
+            "freshness_reference": estimated_time or nav_date or fetched_at,
             "asset_type": "fund",
             "industry": category or "未分类",
             "theme": category or "未分类",

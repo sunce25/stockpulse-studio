@@ -53,4 +53,4 @@ YANGJIBAO_AUTH_RECORD_ID = "primary-yangjibao-auth"
 
 页面和日志只能显示配置状态，不能输出任何 Secret 内容。若凭据曾进入 Git 历史，请立即撤销并重新生成；仅删除当前文件不能消除泄漏风险。
 
-养基宝目前没有已确认的正式公开开发者 API。扫码与持仓同步只允许 HTTPS，并且必须先设置 `APP_PASSWORD`。不要从公开仓库复制或提交 Token、Cookie、手机号、账户 ID 或签名参数。配置 Supabase 后，同步得到的标准化基金持仓会保存到 `FUND_SNAPSHOT_RECORD_ID` 指定的私有记录。只读 Token 与选定账户 ID 使用由服务端 Secrets 派生的密钥加密后保存到 `YANGJIBAO_AUTH_RECORD_ID`；明文 Token、Cookie 和原始响应不会写入数据库。应用重新打开时会恢复授权，快照超过 5 分钟时自动同步，失败则继续展示最后一次快照。接口变化时应立即停用并回退到快照/Demo 模式。
+养基宝目前没有已确认的正式公开开发者 API。扫码与持仓同步只允许 HTTPS，并且必须先设置 `APP_PASSWORD`。不要从公开仓库复制或提交 Token、Cookie、手机号、账户 ID 或签名参数。配置 Supabase 后，同步得到的标准化基金持仓会保存到 `FUND_SNAPSHOT_RECORD_ID` 指定的私有记录。只读 Token 与选定账户 ID 使用由服务端 Secrets 派生的密钥加密后保存到 `YANGJIBAO_AUTH_RECORD_ID`；明文 Token、Cookie 和原始响应不会写入数据库。应用重新打开时会恢复授权，基金页保持打开时每 5 分钟自动同步，也可手动立即同步，失败则继续展示最后一次快照。接口变化时应立即停用并回退到快照/Demo 模式。

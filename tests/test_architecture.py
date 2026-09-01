@@ -228,13 +228,14 @@ class FundArchitectureTests(unittest.TestCase):
                                     "short_name": "测试基金",
                                     "hold_share": "100.5",
                                     "hold_cost": "1.2",
-                                    "last_net": "1.3",
                                     "money": "130.65",
                                     "hold_earn": "10.05",
                                     "cost_money": "120.60",
                                     "jzrq": "2026-08-31",
                                     "nv_info": {
+                                        "dwjz": "1.3",
                                         "gsz": "1.31",
+                                        "vgszzl": "1.5",
                                         "gztime": "2026-09-01T10:00:00+08:00",
                                     },
                                 }
@@ -278,7 +279,9 @@ class FundArchitectureTests(unittest.TestCase):
         self.assertEqual(holdings[0]["fund_code"], "000001")
         self.assertEqual(holdings[0]["source"], "yangjibao")
         self.assertEqual(holdings[0]["market_value"], 130.65)
+        self.assertEqual(holdings[0]["latest_nav"], 1.3)
         self.assertEqual(holdings[0]["estimated_nav"], 1.31)
+        self.assertAlmostEqual(holdings[0]["today_profit"], 1.95975)
         self.assertTrue(set(FUND_HOLDING_FIELDS).issubset(holdings[0]))
         self.assertNotIn("hold_share", holdings[0])
 
