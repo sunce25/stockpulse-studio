@@ -12,8 +12,8 @@
 
 ## 2. 一次性上传现有持仓
 
-1. 将 `.streamlit/secrets.toml.example` 复制为 `.streamlit/secrets.toml`。
-2. 填入 `SUPABASE_URL`、`SUPABASE_SECRET_KEY` 和一个强访问密码。
+1. 新建 `.streamlit/secrets.toml`（变量名可参考 `.env.example` 和下方模板）。
+2. 填入 `SUPABASE_URL`、`SUPABASE_SECRET_KEY` 和一个强且不与其他账户共用的访问密码。
 3. 在项目根目录执行：
 
 ```powershell
@@ -24,7 +24,7 @@ python scripts/upload_watchlist.py --data-file data/watchlist.json
 
 ## 3. 发布到 Streamlit Community Cloud
 
-1. 将项目提交到私有 GitHub 仓库。
+1. 将项目提交到 GitHub；公开仓库只能包含代码和空白配置模板。
 2. 在 `share.streamlit.io` 创建应用，入口文件填写 `app.py`。
 3. Python 版本选择 3.12。
 4. 在 Advanced settings → Secrets 中填写：

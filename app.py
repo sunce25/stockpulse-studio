@@ -8,6 +8,8 @@ import pandas as pd
 import numpy as np
 import datetime
 import hmac
+import html
+import time
 
 # 导入自定义模块
 from modules.data_adapter import DataAdapter, POPULAR_STOCKS
@@ -117,15 +119,31 @@ def require_app_password() -> None:
     if not expected_password or st.session_state.get("app_access_granted", False):
         return
 
+    now = time.monotonic()
+    locked_until = float(st.session_state.get("app_access_locked_until", 0.0) or 0.0)
+    if locked_until > now:
+        remaining = max(1, int(locked_until - now) + 1)
+        st.error(f"密码连续输错次数过多，请等待 {remaining} 秒后重试。")
+        st.stop()
+
     st.markdown("<div class='main-title'>🔒 StockPulse 私有访问</div>", unsafe_allow_html=True)
     st.caption("请输入部署时设置的访问密码。")
-    with st.form("stockpulse_access_form"):
+    with st.form("stockpulse_access_form", clear_on_submit=True):
         entered_password = st.text_input("访问密码", type="password")
         submitted = st.form_submit_button("进入应用", use_container_width=True)
     if submitted:
         if hmac.compare_digest(entered_password, expected_password):
             st.session_state["app_access_granted"] = True
+            st.session_state.pop("app_access_failed_attempts", None)
+            st.session_state.pop("app_access_locked_until", None)
             st.rerun()
+        failed_attempts = int(st.session_state.get("app_access_failed_attempts", 0) or 0) + 1
+        st.session_state["app_access_failed_attempts"] = failed_attempts
+        if failed_attempts >= 5:
+            st.session_state["app_access_failed_attempts"] = 0
+            st.session_state["app_access_locked_until"] = now + 30.0
+            st.error("密码连续输错次数过多，已暂时锁定 30 秒。")
+            st.stop()
         st.error("访问密码不正确。")
     st.stop()
 
@@ -304,8 +322,9 @@ SIDEBAR_SYMBOL_KEY = "sidebar_watchlist_symbol"
 
 def select_current_symbol(symbol: str, market: str = None) -> None:
     """Update the selected symbol from a widget callback without stale-state rewrites."""
-    normalized_symbol = str(symbol).strip().upper()
+    normalized_symbol = DataAdapter.normalize_symbol(symbol)
     if not normalized_symbol:
+        st.toast("股票代码格式无效，请仅输入常见交易代码。", icon="⚠️")
         return
     st.session_state.current_symbol = normalized_symbol
     st.session_state.current_market = market or adapter.detect_market(normalized_symbol)
@@ -528,11 +547,14 @@ if nav_option == "📈 个股深度走势":
     price_color_cls = "up-tag" if pct_chg >= 0 else "down-tag"
     chg_sign = "+" if pct_chg > 0 else ""
     wl_badge = " [⭐已在自选]" if is_in_watchlist else ""
+    safe_quote_name = html.escape(str(quote.get("name", curr_sym)))
+    safe_curr_sym = html.escape(str(curr_sym))
+    safe_curr_mkt = html.escape(str(curr_mkt))
 
     with m_col1:
         st.markdown(f"""
         <div class='metric-card'>
-            <div class='metric-label'>{quote.get('name', curr_sym)} ({curr_sym}) · {curr_mkt}{wl_badge}</div>
+            <div class='metric-label'>{safe_quote_name} ({safe_curr_sym}) · {safe_curr_mkt}{wl_badge}</div>
             <div class='metric-value {price_color_cls}'>{quote.get('price', 0.0):.2f}</div>
         </div>
         """, unsafe_allow_html=True)
@@ -625,8 +647,11 @@ if nav_option == "📈 个股深度走势":
         with d_col2:
             st.write("**形态信号检测：**")
             for sig in diag["signals"]:
-                pill_class = f"signal-pill-{sig['type']}"
-                st.markdown(f"<span class='{pill_class}'>{sig['tag']}</span> {sig['desc']}", unsafe_allow_html=True)
+                signal_type = sig.get("type") if sig.get("type") in {"bullish", "bearish", "warning"} else "warning"
+                pill_class = f"signal-pill-{signal_type}"
+                safe_tag = html.escape(str(sig.get("tag", "")))
+                safe_description = html.escape(str(sig.get("desc", "")))
+                st.markdown(f"<span class='{pill_class}'>{safe_tag}</span> {safe_description}", unsafe_allow_html=True)
             st.info(f"💡 **操盘建议参考**：{diag['summary']}")
 
     else:
@@ -778,6 +803,8 @@ elif nav_option == "⭐ 自选股与组合":
             st.caption("☁️ 持仓、自选分组和排序已启用云端持久化。")
     elif cloud_config_incomplete:
         st.warning("云端存储配置不完整，当前暂时使用本地数据。")
+    elif getattr(watchlist_mgr, "configuration_error", ""):
+        st.warning(getattr(watchlist_mgr, "configuration_error"))
 
     quick_hide_notice = st.session_state.pop("portfolio_quick_hide_notice", None)
     if quick_hide_notice:
@@ -1321,17 +1348,21 @@ elif nav_option == "🤖 智能形态诊断":
         # 核心评级大卡片
         score_val = report["score"]
         score_color = "#ef4444" if score_val >= 70 else ("#f59e0b" if score_val >= 50 else "#22c55e")
+        safe_diag_name = html.escape(str(quote_info.get("name", diag_sym)))
+        safe_diag_symbol = html.escape(str(diag_sym))
+        safe_diag_market = html.escape(str(diag_mkt))
+        safe_diag_status = html.escape(str(report.get("status", "")))
         
         st.markdown(f"""
         <div style='background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); color: white; padding: 24px; border-radius: 12px; margin-bottom: 20px;'>
             <div style='display: flex; justify-content: space-between; align-items: center;'>
                 <div>
-                    <h2 style='margin:0; color: white;'>{quote_info.get('name', diag_sym)} ({diag_sym}) · {diag_mkt}</h2>
+                    <h2 style='margin:0; color: white;'>{safe_diag_name} ({safe_diag_symbol}) · {safe_diag_market}</h2>
                     <p style='color: #94a3b8; margin: 4px 0 0 0;'>现价：{quote_info.get('price', 0.0):.2f} | 涨跌幅：{quote_info.get('pct_chg', 0.0):+.2f}%</p>
                 </div>
                 <div style='text-align: right;'>
                     <div style='font-size: 32px; font-weight: 800; color: {score_color};'>{score_val} <span style='font-size:16px;'>分</span></div>
-                    <div style='font-size: 14px; font-weight: 600; color: #cbd5e1;'>{report['status']}</div>
+                    <div style='font-size: 14px; font-weight: 600; color: #cbd5e1;'>{safe_diag_status}</div>
                 </div>
             </div>
         </div>
@@ -1341,11 +1372,14 @@ elif nav_option == "🤖 智能形态诊断":
         with col_left:
             st.markdown("#### 📑 逐项指标技术诊断报告")
             for sig in report["signals"]:
-                p_cls = f"signal-pill-{sig['type']}"
+                signal_type = sig.get("type") if sig.get("type") in {"bullish", "bearish", "warning"} else "warning"
+                p_cls = f"signal-pill-{signal_type}"
+                safe_tag = html.escape(str(sig.get("tag", "")))
+                safe_description = html.escape(str(sig.get("desc", "")))
                 st.markdown(f"""
                 <div style='margin-bottom: 12px; padding: 10px 14px; background: #f8fafc; border-left: 4px solid {score_color}; border-radius: 4px;'>
-                    <span class='{p_cls}'>{sig['tag']}</span>
-                    <span style='color: #334155; font-size: 14px;'>{sig['desc']}</span>
+                    <span class='{p_cls}'>{safe_tag}</span>
+                    <span style='color: #334155; font-size: 14px;'>{safe_description}</span>
                 </div>
                 """, unsafe_allow_html=True)
 

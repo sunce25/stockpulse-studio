@@ -4,6 +4,7 @@ Multi-Dimensional Stock Screener & Technical Filter for StockPulse Studio.
 Filters A-shares, US stocks, and ETFs by fundamental & technical criteria.
 """
 import io
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
 from modules.data_adapter import DataAdapter
@@ -59,49 +60,11 @@ class StockScreener:
             return pd.DataFrame()
 
         # 3. 策略/技术形态二次扫描
-        if preset_strategy == "均线多头精选":
-            # 抽样扫描前 25 只的技术 K 线
-            matched_symbols = []
-            for _, row in filtered_df.head(25).iterrows():
-                try:
-                    k_df = self.adapter.get_kline_data(row["symbol"], market=market_type, limit=30)
-                    if len(k_df) >= 20:
-                        k_df = add_all_indicators(k_df)
-                        latest = k_df.iloc[-1]
-                        if latest["close"] > latest["MA_5"] > latest["MA_10"] > latest["MA_20"]:
-                            matched_symbols.append(row["symbol"])
-                except Exception:
-                    pass
-            filtered_df = filtered_df[filtered_df["symbol"].isin(matched_symbols)]
-
-        elif preset_strategy == "MACD金叉反弹":
-            matched_symbols = []
-            for _, row in filtered_df.head(25).iterrows():
-                try:
-                    k_df = self.adapter.get_kline_data(row["symbol"], market=market_type, limit=30)
-                    if len(k_df) >= 20:
-                        k_df = add_all_indicators(k_df)
-                        latest = k_df.iloc[-1]
-                        prev = k_df.iloc[-2]
-                        if prev["MACD_DIF"] <= prev["MACD_DEA"] and latest["MACD_DIF"] > latest["MACD_DEA"]:
-                            matched_symbols.append(row["symbol"])
-                except Exception:
-                    pass
-            filtered_df = filtered_df[filtered_df["symbol"].isin(matched_symbols)]
-
-        elif preset_strategy == "放量突破":
-            matched_symbols = []
-            for _, row in filtered_df.head(25).iterrows():
-                try:
-                    k_df = self.adapter.get_kline_data(row["symbol"], market=market_type, limit=20)
-                    if len(k_df) >= 10:
-                        k_df = add_all_indicators(k_df)
-                        latest = k_df.iloc[-1]
-                        vol_5 = latest.get("VOL_MA_5", 1)
-                        if vol_5 > 0 and (latest["volume"] / vol_5 >= 1.7) and latest["close"] > latest["open"]:
-                            matched_symbols.append(row["symbol"])
-                except Exception:
-                    pass
+        if preset_strategy in {"均线多头精选", "MACD金叉反弹", "放量突破"}:
+            candidates = filtered_df.head(25)["symbol"].astype(str).tolist()
+            matched_symbols = self._scan_technical_strategy(
+                candidates, market_type, preset_strategy
+            )
             filtered_df = filtered_df[filtered_df["symbol"].isin(matched_symbols)]
 
         elif preset_strategy == "低估值蓝筹":
@@ -110,6 +73,58 @@ class StockScreener:
         # 排序
         filtered_df = filtered_df.sort_values(by="pct_chg", ascending=False).reset_index(drop=True)
         return filtered_df
+
+    def _scan_technical_strategy(
+        self, symbols: list[str], market_type: str, strategy: str
+    ) -> list[str]:
+        """Scan independent symbols concurrently with a conservative worker cap."""
+        if not symbols:
+            return []
+
+        def matches(symbol: str) -> bool:
+            limit = 20 if strategy == "放量突破" else 30
+            try:
+                k_df = self.adapter.get_kline_data(
+                    symbol, market=market_type, limit=limit
+                )
+                minimum_rows = 10 if strategy == "放量突破" else 20
+                if k_df is None or len(k_df) < minimum_rows:
+                    return False
+                k_df = add_all_indicators(k_df)
+                latest = k_df.iloc[-1]
+                if strategy == "均线多头精选":
+                    return bool(
+                        latest["close"]
+                        > latest["MA_5"]
+                        > latest["MA_10"]
+                        > latest["MA_20"]
+                    )
+                if strategy == "MACD金叉反弹":
+                    prev = k_df.iloc[-2]
+                    return bool(
+                        prev["MACD_DIF"] <= prev["MACD_DEA"]
+                        and latest["MACD_DIF"] > latest["MACD_DEA"]
+                    )
+                vol_5 = float(latest.get("VOL_MA_5", 0.0) or 0.0)
+                return bool(
+                    vol_5 > 0
+                    and latest["volume"] / vol_5 >= 1.7
+                    and latest["close"] > latest["open"]
+                )
+            except (KeyError, TypeError, ValueError, IndexError):
+                return False
+
+        matched = set()
+        with ThreadPoolExecutor(max_workers=min(6, len(symbols))) as executor:
+            futures = {executor.submit(matches, symbol): symbol for symbol in symbols}
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    if future.result():
+                        matched.add(symbol)
+                except Exception:
+                    continue
+        return [symbol for symbol in symbols if symbol in matched]
 
     def export_to_excel(self, df: pd.DataFrame) -> bytes:
         """导出筛选结果为 Excel 二进制字节流"""

@@ -121,11 +121,26 @@ class WatchlistManager:
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             data_file = os.path.join(base_dir, "data", "watchlist.json")
         self.data_file = data_file
+        self._loaded_mtime_ns = None
         self.data = self._load()
+        self._remember_file_mtime()
+
+    def _remember_file_mtime(self) -> None:
+        try:
+            self._loaded_mtime_ns = os.stat(self.data_file).st_mtime_ns
+        except OSError:
+            self._loaded_mtime_ns = None
 
     def reload(self) -> Dict:
-        """重新从磁盘加载最新自选股数据"""
+        """Reload only when another process actually changed the local cache."""
+        try:
+            current_mtime_ns = os.stat(self.data_file).st_mtime_ns
+        except OSError:
+            current_mtime_ns = None
+        if current_mtime_ns is not None and current_mtime_ns == self._loaded_mtime_ns:
+            return self.data
         self.data = self._load()
+        self._remember_file_mtime()
         return self.data
 
     def _load(self) -> Dict:
@@ -167,6 +182,7 @@ class WatchlistManager:
                 os.fsync(tmp_file.fileno())
                 tmp_path = tmp_file.name
             os.replace(tmp_path, self.data_file)
+            self._remember_file_mtime()
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)

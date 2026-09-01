@@ -5,6 +5,7 @@ import copy
 import time
 from datetime import datetime, timezone
 from typing import Dict, Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -37,10 +38,15 @@ class SupabaseJsonStore:
         self.project_url = str(project_url).strip().rstrip("/")
         self.secret_key = str(secret_key).strip()
         self.record_id = str(record_id).strip() or "primary"
-        self.timeout = float(timeout)
+        self.timeout = max(3.0, min(float(timeout), 30.0))
         self.session = session or requests
-        if not self.project_url or not self.secret_key:
-            raise ValueError("Supabase URL and secret key are required")
+        parsed_url = urlparse(self.project_url)
+        if (
+            parsed_url.scheme.lower() != "https"
+            or not parsed_url.netloc
+            or not self.secret_key
+        ):
+            raise ValueError("Supabase HTTPS URL and secret key are required")
 
     @property
     def endpoint(self) -> str:
@@ -70,7 +76,7 @@ class SupabaseJsonStore:
             response.raise_for_status()
             rows = response.json()
         except Exception as exc:
-            raise CloudStorageError(f"读取云端持仓失败：{exc}") from exc
+            raise CloudStorageError("读取云端持仓失败，请稍后重试。") from exc
 
         if not rows:
             return None
@@ -97,7 +103,7 @@ class SupabaseJsonStore:
             )
             response.raise_for_status()
         except Exception as exc:
-            raise CloudStorageError(f"保存云端持仓失败：{exc}") from exc
+            raise CloudStorageError("保存云端持仓失败，请稍后重试。") from exc
 
 
 class CloudBackedWatchlistManager(WatchlistManager):
@@ -167,13 +173,23 @@ def create_watchlist_manager(
 ):
     """Create a cloud manager only when both Supabase settings are present."""
     if str(supabase_url).strip() and str(supabase_secret_key).strip():
-        return CloudBackedWatchlistManager(
-            data_file=data_file,
-            project_url=supabase_url,
-            secret_key=supabase_secret_key,
-            record_id=record_id,
-        )
+        try:
+            return CloudBackedWatchlistManager(
+                data_file=data_file,
+                project_url=supabase_url,
+                secret_key=supabase_secret_key,
+                record_id=record_id,
+            )
+        except ValueError:
+            manager = WatchlistManager(data_file=data_file)
+            manager.persistence_mode = "local"
+            manager.remote_error = ""
+            manager.configuration_error = (
+                "云端存储配置无效：仅允许使用 HTTPS Supabase 地址，当前使用本地缓存。"
+            )
+            return manager
     manager = WatchlistManager(data_file=data_file)
     manager.persistence_mode = "local"
     manager.remote_error = ""
+    manager.configuration_error = ""
     return manager

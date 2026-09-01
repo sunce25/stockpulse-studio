@@ -102,6 +102,13 @@ class DataAdapter:
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _ensure_success(response) -> None:
+        """Raise on real HTTP failures while keeping lightweight test doubles usable."""
+        raise_for_status = getattr(response, "raise_for_status", None)
+        if callable(raise_for_status):
+            raise_for_status()
+
     def detect_market(self, symbol: str) -> str:
         """自动推测股票所属市场"""
         sym = symbol.strip().upper()
@@ -113,9 +120,19 @@ class DataAdapter:
             return "美股"
         return "A股"
 
+    @staticmethod
+    def normalize_symbol(symbol: str) -> str:
+        """Accept common exchange symbols while rejecting URL/control injection."""
+        normalized = str(symbol or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9.^-]{1,20}", normalized):
+            return ""
+        return normalized
+
     def get_tencent_code(self, symbol: str, market: str = None) -> str:
         """将股票代码转换为腾讯接口格式"""
-        sym = symbol.strip().upper()
+        sym = self.normalize_symbol(symbol)
+        if not sym:
+            return ""
         if not market or market == "auto":
             market = self.detect_market(sym)
 
@@ -130,7 +147,9 @@ class DataAdapter:
 
     def get_realtime_quote(self, symbol: str, market: str = "auto") -> dict:
         """获取单个标的的实时行情数据"""
-        sym = symbol.strip().upper()
+        sym = self.normalize_symbol(symbol)
+        if not sym:
+            return self._invalid_quote(market if market != "auto" else "未知")
         if market == "auto":
             market = self.detect_market(sym)
 
@@ -149,6 +168,7 @@ class DataAdapter:
         
         try:
             r = requests.get(url, headers=self.headers, timeout=4)
+            self._ensure_success(r)
             text = r.content.decode("gbk", errors="ignore")
             if not text or "~" not in text:
                 return remember(self._fallback_quote(sym, market))
@@ -296,6 +316,30 @@ class DataAdapter:
             if str(key).startswith(("us_extended:", "quote:", "batch_quotes:")):
                 self.cache.pop(key, None)
 
+    @staticmethod
+    def _invalid_quote(market: str = "未知") -> dict:
+        """Return a non-networking quote for rejected user input."""
+        return {
+            "symbol": "",
+            "name": "无效代码",
+            "market": market,
+            "price": 0.0,
+            "prev_close": 0.0,
+            "open": 0.0,
+            "high": 0.0,
+            "low": 0.0,
+            "change": 0.0,
+            "pct_chg": 0.0,
+            "volume": 0.0,
+            "turnover": 0.0,
+            "pe": 0.0,
+            "mktcap": 0.0,
+            "time": "",
+            "source": "股票代码格式无效",
+            "session": "未知",
+            "is_extended_hours": False,
+        }
+
     def _apply_us_extended_quotes(self, quotes: list[dict]) -> list[dict]:
         """Update US quotes concurrently so one slow symbol does not block the page."""
         candidates = [
@@ -372,16 +416,20 @@ class DataAdapter:
         tc_codes = []
         item_map = {}
         for it in items:
-            sym = it["symbol"].strip().upper()
+            sym = self.normalize_symbol(it.get("symbol", ""))
             mkt = it.get("market", self.detect_market(sym))
             tc = self.get_tencent_code(sym, mkt)
             tc_codes.append(tc)
-            item_map[tc.lower()] = it
+            if tc:
+                item_map[tc.lower()] = {**it, "symbol": sym}
 
-        url = f"https://qt.gtimg.cn/q={','.join(tc_codes)}"
+        url = f"https://qt.gtimg.cn/q={','.join(code for code in tc_codes if code)}"
         results_by_code = {}
         try:
+            if not item_map:
+                raise ValueError("no valid symbols")
             r = requests.get(url, headers=self.headers, timeout=5)
+            self._ensure_success(r)
             text = r.content.decode("gbk", errors="ignore")
             lines = [l for l in text.split(";") if l.strip()]
             for line in lines:
@@ -427,7 +475,11 @@ class DataAdapter:
         for item, tc_code in zip(items, tc_codes):
             quote = results_by_code.get(tc_code.lower())
             if quote is None:
-                quote = self.get_realtime_quote(item["symbol"], item.get("market", "auto"))
+                quote = (
+                    self.get_realtime_quote(item.get("symbol", ""), item.get("market", "auto"))
+                    if tc_code
+                    else self._invalid_quote(item.get("market", "未知"))
+                )
                 quote["extra"] = item
             results.append(quote)
         results = self._apply_us_extended_quotes(results)
@@ -448,36 +500,38 @@ class DataAdapter:
         rate = 6.745925
         source = "内置参考（2026-08-30）"
 
-        # Tencent is already used for quotes by this app and is usually more
-        # reachable in the same network environment.
+        # Prefer the dedicated daily-rate API. Tencent's FX endpoint often
+        # stalls on Streamlit Cloud even while its stock quote endpoint works.
         try:
             response = requests.get(
-                "http://qt.gtimg.cn/q=fx_usr",
+                "https://open.er-api.com/v6/latest/USD",
                 headers=self.headers,
-                timeout=4,
+                timeout=3,
             )
-            text = response.content.decode("gbk", errors="ignore")
-            parts = text.split("~")
-            fetched_rate = float(parts[3]) if len(parts) > 3 and parts[3] else 0.0
+            self._ensure_success(response)
+            payload = response.json()
+            fetched_rate = float(payload.get("rates", {}).get("CNY", 0.0) or 0.0)
             if 5.0 <= fetched_rate <= 10.0:
                 rate = fetched_rate
-                source = "腾讯财经实时汇率"
+                source = "ExchangeRate-API 每日汇率"
         except (requests.RequestException, ValueError, TypeError, AttributeError, IndexError):
             pass
 
-        # Secondary public source when Tencent is unavailable.
+        # Short Tencent fallback when the dedicated source is unavailable.
         if source.startswith("内置参考"):
             try:
                 response = requests.get(
-                    "https://open.er-api.com/v6/latest/USD",
+                    "https://qt.gtimg.cn/q=fx_usr",
                     headers=self.headers,
-                    timeout=4,
+                    timeout=2,
                 )
-                payload = response.json()
-                fetched_rate = float(payload.get("rates", {}).get("CNY", 0.0) or 0.0)
+                self._ensure_success(response)
+                text = response.content.decode("gbk", errors="ignore")
+                parts = text.split("~")
+                fetched_rate = float(parts[3]) if len(parts) > 3 and parts[3] else 0.0
                 if 5.0 <= fetched_rate <= 10.0:
                     rate = fetched_rate
-                    source = "ExchangeRate-API 每日汇率"
+                    source = "腾讯财经实时汇率"
             except (requests.RequestException, ValueError, TypeError, AttributeError):
                 pass
 
@@ -493,7 +547,11 @@ class DataAdapter:
         limit: int = 360,
     ) -> pd.DataFrame:
         """Return a defensive copy of short-lived cached historical data."""
-        sym = symbol.strip().upper()
+        sym = self.normalize_symbol(symbol)
+        if not sym:
+            return pd.DataFrame(
+                columns=["date", "open", "close", "high", "low", "volume"]
+            )
         normalized_market = self.detect_market(sym) if market == "auto" else market
         cache_key = f"kline:{normalized_market}:{sym}:{period}:{int(limit)}"
         cached = self.cache.get(cache_key)
@@ -562,10 +620,11 @@ class DataAdapter:
         period_map = {"daily": "day", "weekly": "week", "monthly": "month"}
         p_str = period_map.get(period, "day")
         tc_code = self.get_tencent_code(sym, market)
-        url = f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={tc_code},{p_str},,,{limit},qfq"
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={tc_code},{p_str},,,{limit},qfq"
 
         try:
             r = requests.get(url, headers=self.headers, timeout=5)
+            self._ensure_success(r)
             data = r.json()
             if "data" in data and tc_code in data["data"]:
                 stock_data = data["data"][tc_code]
@@ -593,8 +652,9 @@ class DataAdapter:
         # 3. 备用新浪 A 股 K 线接口
         try:
             sina_code = tc_code
-            sina_url = f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={sina_code}&scale=240&ma=no&datalen={limit}"
+            sina_url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={sina_code}&scale=240&ma=no&datalen={limit}"
             r = requests.get(sina_url, headers=self.headers, timeout=5)
+            self._ensure_success(r)
             data = r.json()
             if data and isinstance(data, list):
                 rows = []
@@ -697,9 +757,10 @@ class DataAdapter:
 
         else:
             # A股主板与热门股池 (拉取新浪 A 股列表前 top_n)
-            url = f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num={top_n}&sort=amount&asc=0&node=hs_a&symbol=&_s_r_a=init"
+            url = f"https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num={top_n}&sort=amount&asc=0&node=hs_a&symbol=&_s_r_a=init"
             try:
                 r = requests.get(url, headers=self.headers, timeout=5)
+                self._ensure_success(r)
                 data = r.json()
                 rows = []
                 for item in data:

@@ -19,7 +19,11 @@ except ImportError:
     sys.modules["requests"] = requests_stub
 
 from modules.data_adapter import DataAdapter
-from modules.cloud_storage import CloudBackedWatchlistManager
+from modules.cloud_storage import (
+    CloudBackedWatchlistManager,
+    CloudStorageError,
+    SupabaseJsonStore,
+)
 from modules.indicators import add_all_indicators, add_rsi
 from modules.screener import StockScreener
 from modules.watchlist import DEFAULT_WATCHLIST_DATA, WatchlistManager, has_active_position
@@ -65,6 +69,27 @@ class ScreenerTests(unittest.TestCase):
         result = StockScreener(adapter).screen(preset_strategy="均线多头精选")
         self.assertTrue(result.empty)
 
+    def test_concurrent_technical_scan_preserves_candidate_order(self):
+        class FakeAdapter:
+            def get_market_spot_pool(self, market_type, top_n):
+                _ = (market_type, top_n)
+                return pd.DataFrame(
+                    [
+                        {"symbol": "SECOND", "price": 20, "pct_chg": 2},
+                        {"symbol": "FIRST", "price": 10, "pct_chg": 1},
+                    ]
+                )
+
+            def get_kline_data(self, symbol, market, limit):
+                _ = (symbol, market, limit)
+                return make_kline(30, rising=True)
+
+        result = StockScreener(FakeAdapter()).screen(
+            preset_strategy="均线多头精选"
+        )
+
+        self.assertEqual(result["symbol"].tolist(), ["SECOND", "FIRST"])
+
 
 class BatchQuoteTests(unittest.TestCase):
     @staticmethod
@@ -98,6 +123,14 @@ class BatchQuoteTests(unittest.TestCase):
         self.assertEqual(first["price"], 1500.0)
         self.assertEqual(second, first)
         request_get.assert_called_once()
+
+    def test_invalid_symbol_is_rejected_without_network_request(self):
+        adapter = DataAdapter()
+        with patch("modules.data_adapter.requests.get") as request_get:
+            result = adapter.get_realtime_quote("../../private", "美股")
+
+        request_get.assert_not_called()
+        self.assertEqual(result["source"], "股票代码格式无效")
 
     def test_batch_quotes_use_short_lived_cache(self):
         adapter = DataAdapter()
@@ -193,15 +226,14 @@ class BatchQuoteTests(unittest.TestCase):
 
     def test_usd_cny_rate_is_fetched_and_cached(self):
         adapter = DataAdapter()
-        fields = ["", "美元人民币", "USD/CNY", "6.745925"]
-        response = types.SimpleNamespace(content=("~".join(fields)).encode("gbk"))
+        response = types.SimpleNamespace(json=lambda: {"rates": {"CNY": 6.745925}})
         with patch("modules.data_adapter.requests.get", return_value=response) as request_get:
             first = adapter.get_usd_cny_rate()
             second = adapter.get_usd_cny_rate()
 
         self.assertEqual(first, 6.745925)
         self.assertEqual(second, first)
-        self.assertEqual(adapter.usd_cny_rate_source, "腾讯财经实时汇率")
+        self.assertEqual(adapter.usd_cny_rate_source, "ExchangeRate-API 每日汇率")
         request_get.assert_called_once()
 
     def test_usd_cny_offline_fallback_is_current_and_labeled(self):
@@ -231,6 +263,35 @@ class WatchlistTests(unittest.TestCase):
                 content = json.load(saved)
             self.assertTrue(any(item["symbol"] == "TEST" for item in content["items"]))
         self.assertEqual(DEFAULT_WATCHLIST_DATA, original_defaults)
+
+    def test_unchanged_local_watchlist_is_not_reopened_on_every_read(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_file = Path(temp_dir) / "watchlist.json"
+            manager = WatchlistManager(str(data_file))
+            real_open = open
+            with patch("builtins.open", wraps=real_open) as open_mock:
+                manager.get_items()
+                manager.get_groups()
+
+            open_mock.assert_not_called()
+
+    def test_supabase_store_requires_https_and_redacts_transport_errors(self):
+        with self.assertRaises(ValueError):
+            SupabaseJsonStore("http://example.supabase.co", "private-secret")
+
+        class LeakySession:
+            def get(self, *args, **kwargs):
+                _ = (args, kwargs)
+                raise RuntimeError("transport failed with private-secret")
+
+        store = SupabaseJsonStore(
+            "https://example.supabase.co",
+            "private-secret",
+            session=LeakySession(),
+        )
+        with self.assertRaises(CloudStorageError) as raised:
+            store.load()
+        self.assertNotIn("private-secret", str(raised.exception))
 
     def test_batch_hide_is_persistent_and_reversible(self):
         with tempfile.TemporaryDirectory() as temp_dir:
