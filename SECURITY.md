@@ -17,7 +17,7 @@ StockPulse Studio 可以公开代码，但密钥、登录凭据和个人投资�
 
 所有携带 Supabase 或养基宝凭据的服务端请求必须使用 HTTPS。股票代码在进入第三方行情 URL 前会经过字符白名单校验，第三方行情名称在进入自定义 HTML 前必须转义。公网访问密码仅用于个人应用的基础防护，不应与邮箱、Google、Supabase 或其他重要账户共用。
 
-Gemini API Key必须使用服务端环境变量或Streamlit Secrets中的`GEMINI_API_KEY`，不得发送到浏览器、写入Prompt或进入分析历史。建议在Google AI Studio创建Auth Key并限制为Gemini API专用。发送投资组合给Gemini前，页面必须获得用户当次明确授权；Context Builder只允许标准化基金分析字段，拒绝向LLM传递凭据和账户标识。
+OpenRouter API Key必须使用服务端环境变量或 Streamlit Secrets 中的 `OPENROUTER_API_KEY`，不得发送到浏览器、写入 Prompt 或进入分析历史。发送投资组合给 OpenRouter 前，页面必须获得用户当次明确授权；Context Builder 只允许标准化基金分析字段，拒绝向 LLM 传递凭据和账户标识。
 
 养基宝实验连接必须使用 HTTPS，并要求应用已配置访问密码。扫码 Token 不得通过调试日志、URL 参数、浏览器存储或第三方二维码生成服务传递。启用 Supabase 时，最小化只读授权使用 `cryptography` 的 Fernet 认证加密后保存，密钥由服务端 Supabase Secret 与应用密码派生；数据库不得保存明文 Token、Cookie、账户 ID 或养基宝原始响应。标准化基金快照与加密授权使用独立记录，用户可在页面主动清除已保存授权。
 

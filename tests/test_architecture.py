@@ -5,8 +5,8 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from ai.context_builder import ANALYSIS_HISTORY_FIELDS, build_analysis_context
-from ai.copilot import AICopilot, EMPTY_QUESTION_MESSAGE, NOT_CONFIGURED_MESSAGE
-from ai.providers.gemini import GEMINI_INTERACTIONS_URL, GeminiProvider
+from ai.copilot import AICopilot, EMPTY_QUESTION_MESSAGE
+from services.openrouter import OPENROUTER_CHAT_URL, generate_ai_analysis
 from config.settings import get_setting
 from funds.auth_store import SupabaseYangJiBaoAuthStore
 from funds.fund_adapter import (
@@ -37,7 +37,7 @@ class SettingsTests(unittest.TestCase):
 
 
 class FundArchitectureTests(unittest.TestCase):
-    def test_gemini_provider_uses_header_and_extracts_text(self):
+    def test_openrouter_returns_stable_result_and_uses_bearer_header(self):
         class FakeResponse:
             status_code = 200
 
@@ -45,15 +45,7 @@ class FundArchitectureTests(unittest.TestCase):
                 return None
 
             def json(self):
-                return {
-                    "status": "completed",
-                    "steps": [
-                        {
-                            "type": "model_output",
-                            "content": [{"type": "text", "text": "组合风险可控。"}],
-                        }
-                    ],
-                }
+                return {"choices": [{"message": {"content": "组合风险可控。"}}]}
 
         class FakeSession:
             def post(self, url, headers, json, timeout, allow_redirects):
@@ -65,60 +57,43 @@ class FundArchitectureTests(unittest.TestCase):
                 return FakeResponse()
 
         session = FakeSession()
-        provider = GeminiProvider(
-            "private-gemini-key", "gemini-3.7-flash", session=session
-        )
-        answer = provider.generate(
-            system_prompt="只解释数据",
-            task_prompt="分析组合",
-            context={"portfolio_summary": {"risk_score": 20}},
-        )
+        result = generate_ai_analysis(api_key="private-openrouter-key", model="openrouter/free", system_prompt="只解释数据", task_prompt="分析组合", context={"portfolio_summary": {"risk_score": 20}}, session=session)
 
-        self.assertEqual(answer, "组合风险可控。")
-        self.assertEqual(session.url, GEMINI_INTERACTIONS_URL)
-        self.assertEqual(session.headers["x-goog-api-key"], "private-gemini-key")
-        self.assertNotIn("private-gemini-key", str(session.body))
-        self.assertFalse(session.body["store"])
-        self.assertNotIn("temperature", session.body["generation_config"])
+        self.assertEqual(result, {"success": True, "model": "openrouter/free", "content": "组合风险可控。", "error": None})
+        self.assertEqual(session.url, OPENROUTER_CHAT_URL)
+        self.assertEqual(session.headers["Authorization"], "Bearer private-openrouter-key")
+        self.assertNotIn("private-openrouter-key", str(session.body))
+        self.assertEqual(session.body["model"], "openrouter/free")
+        self.assertEqual(session.body["temperature"], 0.2)
+        self.assertEqual(session.body["max_tokens"], 1400)
         self.assertFalse(session.allow_redirects)
 
-    def test_gemini_error_detail_redacts_auth_keys(self):
-        class FakeErrorResponse:
-            def json(self):
-                return {
-                    "error": {
-                        "message": "Permission denied for AQ.private-auth-key-value-1234567890"
-                    }
-                }
-
-        provider = GeminiProvider("AQ.private-auth-key-value-1234567890")
-        detail = provider._safe_error_detail(FakeErrorResponse())
-
-        self.assertIn("[REDACTED]", detail)
-        self.assertNotIn("private-auth-key", detail)
+    def test_openrouter_missing_key_is_safe(self):
+        result = generate_ai_analysis(api_key="", model="openrouter/free", system_prompt="", task_prompt="", context={})
+        self.assertFalse(result["success"])
+        self.assertIn("OPENROUTER_API_KEY", result["error"])
 
     def test_copilot_uses_injected_provider_without_exposing_key(self):
         class FakeProvider:
             def generate(self, **kwargs):
                 self.request = kwargs
-                return "仅基于上下文的回答"
+                return {"success": True, "model": "openrouter/free", "content": "仅基于上下文的回答", "error": None}
 
         provider = FakeProvider()
         copilot = AICopilot(
-            provider="gemini",
             api_key="private-key",
-            model="gemini-3.7-flash",
-            provider_client=provider,
+            model="openrouter/free",
+            client=provider.generate,
         )
         answer = copilot.answer_question(
             {"portfolio_summary": {"risk_score": 20}}, "最大风险是什么？"
         )
 
-        self.assertEqual(answer, "仅基于上下文的回答")
+        self.assertEqual(answer["content"], "仅基于上下文的回答")
         self.assertEqual(provider.request["context"]["user_question"], "最大风险是什么？")
-        self.assertNotIn("private-key", str(provider.request))
+        self.assertEqual(provider.request["model"], "openrouter/free")
         self.assertNotIn("api_key", copilot.configuration_status())
-        self.assertEqual(copilot.answer_question({}, ""), EMPTY_QUESTION_MESSAGE)
+        self.assertEqual(copilot.answer_question({}, "")["error"], EMPTY_QUESTION_MESSAGE)
 
     def test_sync_history_distinguishes_investment_from_valuation(self):
         previous = [
@@ -320,8 +295,8 @@ class FundArchitectureTests(unittest.TestCase):
         self.assertFalse(client.is_configured())
         with self.assertRaises(YangJiBaoError):
             client.get_holdings()
-        copilot = AICopilot(provider="", api_key="", model="")
-        self.assertEqual(copilot.answer_question({}, "test"), NOT_CONFIGURED_MESSAGE)
+        copilot = AICopilot(api_key="", model="openrouter/free")
+        self.assertIn("OPENROUTER_API_KEY", copilot.answer_question({}, "test")["error"])
         self.assertNotIn("api_key", copilot.configuration_status())
 
     def test_yangjibao_blocks_insecure_transport(self):
